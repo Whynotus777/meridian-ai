@@ -125,7 +125,11 @@ Return ONLY a valid JSON object with these exact fields:
 
 CRITICAL RULES:
 - Use "not_provided" for ANY field where data is not explicitly in the document
-- All financial numbers should be raw numbers (no $ signs, no commas)
+- MONETARY VALUES: Return ALL monetary values as raw USD integers (no $, no commas, no suffixes).
+  If the document states values in thousands, multiply by 1,000.
+  If in millions, multiply by 1,000,000. If in billions, multiply by 1,000,000,000.
+  Examples: "$628 thousand" → 628000 | "$258.5 million" → 258500000 | "$1.2 billion" → 1200000000
+  Never use abbreviations like "k", "m", or "b" in numeric fields.
 - All percentages as decimals (15% = 0.15)
 - Be conservative — do not extrapolate or assume
 - If a range is given, use the midpoint
@@ -316,7 +320,10 @@ per-field confidence (1.0 = explicitly stated in document, 0.7 = calculated from
 
 CRITICAL RULES:
 - "not_provided" for ANY field not explicitly in the document
-- All financials as raw numbers (not formatted strings)
+- MONETARY VALUES: Return ALL monetary values as raw USD integers (no $, no commas, no suffixes).
+  Normalise from whatever unit the document uses — multiply through to raw USD.
+  Examples: "$628 thousand" → 628000 | "$258.5 million" → 258500000 | "$1.2 billion" → 1200000000
+  Never use abbreviations like "k", "m", or "b" in numeric fields.
 - All rates/margins/percentages as decimals
 - Confidence: 1.0 = stated, 0.7 = computed, 0.4 = inferred, 0.0 = absent
 - If a range is given, use the midpoint as the value

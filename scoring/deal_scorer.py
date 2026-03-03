@@ -48,14 +48,25 @@ class DealScorer:
         ]
 
         total = sum(d.weighted_score for d in dimensions)
+
+        # Data completeness penalty — sparse financial data inflates scores
+        penalty, missing, n_fields = self._data_completeness_penalty(extracted_data)
+        total = total * penalty
+
         grade = self._total_to_grade(total)
         recommendation = self._grade_to_recommendation(grade)
+        summary = self._build_summary(dimensions, grade)
+        if penalty < 1.0:
+            summary += (
+                f" Data completeness penalty applied: {missing}/{n_fields} core "
+                f"financial fields missing (multiplier {penalty:.0%})."
+            )
 
         return DealScore(
             total_score=round(total, 3),
             grade=grade,
             dimensions=dimensions,
-            summary=self._build_summary(dimensions, grade),
+            summary=summary,
             recommendation=recommendation,
         )
 
@@ -97,6 +108,21 @@ class DealScorer:
             reasons.append("Strong competitive position")
 
         score = min(1.0, score)
+
+        # TAM sanity check: a micro-revenue company claiming a trillion-dollar TAM
+        # is not meaningful signal. If TAM > 100,000× LTM revenue, cap at 0.60.
+        tam_num = self._parse_numeric(tam) if (tam and tam != "not_provided") else None
+        rev_num = self._parse_numeric(
+            data.get("financials", {}).get("revenue", {}).get("ltm")
+        )
+        if tam_num and rev_num and rev_num > 0 and tam_num / rev_num > 100_000:
+            if score > 0.60:
+                score = 0.60
+                reasons.append(
+                    f"TAM/revenue ratio >{tam_num / rev_num:,.0f}× — "
+                    f"TAM signal capped (score floored at 60%)"
+                )
+
         weighted = score * self.weights.market_attractiveness
 
         return DimensionScore(
@@ -325,6 +351,62 @@ class DealScorer:
             rationale="; ".join(reasons) if reasons else "Risk assessment limited by available data",
             data_quality=quality,
         )
+
+    def _data_completeness_penalty(self, data: Dict) -> tuple:
+        """Return (multiplier, missing_count, total_fields).
+
+        Checks 6 core financial fields. Penalises deals where the majority of
+        financial data is absent, preventing inflated scores from market/growth
+        signals alone.
+
+        Thresholds:
+            > 75% missing (5-6 of 6)  → 0.75×
+            > 50% missing (4 of 6)    → 0.85×
+            ≤ 50% missing             → no penalty
+        """
+        fin   = data.get("financials", {})
+        ebitda = fin.get("ebitda", {})
+        fields = [
+            fin.get("revenue", {}).get("ltm"),
+            ebitda.get("ltm"),
+            ebitda.get("margin_ltm"),
+            fin.get("gross_margin"),
+            fin.get("recurring_revenue_pct"),
+            fin.get("net_income"),
+        ]
+        missing = sum(1 for f in fields if f is None or f == "not_provided")
+        total   = len(fields)
+        fraction = missing / total
+        if fraction > 0.75:
+            return 0.75, missing, total
+        if fraction > 0.50:
+            return 0.85, missing, total
+        return 1.0, missing, total
+
+    def _parse_numeric(self, val) -> Optional[float]:
+        """Try to parse a value as a raw float.
+
+        Handles: plain numbers, strings with k/m/b suffixes, and ignores
+        'not_provided' / None.
+        """
+        if val is None or val == "not_provided":
+            return None
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            pass
+        if isinstance(val, str):
+            s = val.strip().lower().replace(",", "").replace("$", "")
+            try:
+                if s.endswith("b"):
+                    return float(s[:-1]) * 1_000_000_000
+                if s.endswith("m"):
+                    return float(s[:-1]) * 1_000_000
+                if s.endswith("k"):
+                    return float(s[:-1]) * 1_000
+            except (ValueError, TypeError):
+                pass
+        return None
 
     def _total_to_grade(self, total: float) -> str:
         if total >= 0.80:

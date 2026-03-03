@@ -35,7 +35,7 @@ class ModelConfig:
     """
     provider: Optional[str] = None   # None → auto-detect
     model: Optional[str] = None      # None → default for provider
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     temperature: float = 0.0         # Deterministic for extraction
     api_key: Optional[str] = None
 

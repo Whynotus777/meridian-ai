@@ -9,7 +9,7 @@ import re
 from typing import Dict, Any, Optional
 
 from config.settings import ModelConfig
-from core.llm_client import LLMClient
+from core.llm_client import LLMClient, strip_fences
 from parsers.pdf_parser import ParsedDocument
 from prompts.extraction import SYSTEM_PROMPT, CIM_EXTRACTION_PROMPT
 
@@ -73,13 +73,7 @@ class CIMExtractor:
 
     def _parse_response(self, response_text: str) -> Dict[str, Any]:
         """Parse LLM response into structured dict."""
-        text = response_text.strip()
-
-        # Strip opening fence (```json or ```)
-        text = re.sub(r"^```(?:json)?\s*\n?", "", text)
-        # Strip closing fence
-        text = re.sub(r"\n?```\s*$", "", text)
-        text = text.strip()
+        text = strip_fences(response_text)
 
         # Try direct parse
         try:
