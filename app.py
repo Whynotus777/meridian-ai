@@ -2937,7 +2937,8 @@ if st.session_state.result:
                 with st.expander(f"✅ {len(_ng_confirmed)} confirmed claim(s)", expanded=False):
                     for _g in _ng_confirmed:
                         st.markdown(
-                            f"- **{_g['claim']}** — {_g['extracted_value']} "
+                            f"- **{_escape_dollars(str(_g['claim']))}** — "
+                            f"`{_escape_dollars(str(_g['extracted_value']))}` "
                             f"*(source: {_g['claim_source']})*"
                         )
 
@@ -2945,7 +2946,8 @@ if st.session_state.result:
                 with st.expander(f"❓ {len(_ng_unverifiable)} unverifiable claim(s)", expanded=False):
                     for _g in _ng_unverifiable:
                         st.markdown(
-                            f"- **{_g['claim']}** — {_g['extracted_value']} "
+                            f"- **{_escape_dollars(str(_g['claim']))}** — "
+                            f"`{_escape_dollars(str(_g['extracted_value']))}` "
                             f"*(source: {_g['claim_source']})*"
                         )
         elif not llm_risks:

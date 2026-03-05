@@ -40,6 +40,13 @@ def _safe_float(v) -> Optional[float]:
         return None
 
 
+def _norm_pct(v: Optional[float]) -> Optional[float]:
+    """LLMs sometimes return 22.5 instead of 0.225. If |v| > 1.5 treat as raw %."""
+    if v is None:
+        return None
+    return v / 100.0 if abs(v) > 1.5 else v
+
+
 def _split_sentences(memo_text: str) -> List[Tuple[str, str]]:
     """Split memo markdown into (sentence, section_heading) pairs."""
     results: List[Tuple[str, str]] = []
@@ -103,12 +110,12 @@ def detect_narrative_gaps(
 
     rev_ltm          = _safe_float(rev.get("ltm"))
     ebitda_ltm       = _safe_float(ebitda.get("ltm")) or _safe_float(ebitda.get("adjusted_ebitda_ltm"))
-    ebitda_margin    = _safe_float(ebitda.get("margin_ltm"))
-    gross_margin     = _safe_float(fin.get("gross_margin"))
-    cagr_3yr         = _safe_float(rev.get("cagr_3yr"))
-    recurring_rev_pct = _safe_float(fin.get("recurring_revenue_pct"))
-    top_cust_conc    = _safe_float(customers.get("top_customer_concentration"))
-    retention        = _safe_float(customers.get("customer_retention"))
+    ebitda_margin    = _norm_pct(_safe_float(ebitda.get("margin_ltm")))
+    gross_margin     = _norm_pct(_safe_float(fin.get("gross_margin")))
+    cagr_3yr         = _norm_pct(_safe_float(rev.get("cagr_3yr")))
+    recurring_rev_pct = _norm_pct(_safe_float(fin.get("recurring_revenue_pct")))
+    top_cust_conc    = _norm_pct(_safe_float(customers.get("top_customer_concentration")))
+    retention        = _norm_pct(_safe_float(customers.get("customer_retention")))
     _raw_history     = rev.get("history") or {}
     # Normalise: list [{year, value}] → dict {str(year): value}
     if isinstance(_raw_history, list):
@@ -118,11 +125,15 @@ def detect_narrative_gaps(
         rev_history = _raw_history
 
     # ── Compiled patterns ──────────────────────────────────────────────────
+    # Sign group captures ASCII minus, en-dash (–), unicode minus (−)
     _dollar_pat    = re.compile(
-        r'\$\s*([\d,]+(?:\.\d+)?)\s*(million|MM|M|billion|B|bn|thousand|K)?',
+        r'(?P<dsign>[-\u2013\u2212])?\s*\$\s*(?P<dnum>[\d,]+(?:\.\d+)?)'
+        r'\s*(?P<dunit>million|MM|M|billion|B|bn|thousand|K)?',
         re.IGNORECASE,
     )
-    _pct_pat       = re.compile(r'([\d]+(?:\.\d+)?)\s*%')
+    _pct_pat       = re.compile(
+        r'(?<![.\d])(?P<psign>[-\u2013\u2212])?\s*(?P<pnum>[\d]+(?:\.\d+)?)\s*%'
+    )
     _rev_kw        = re.compile(r'\brevenue\b|\bsales\b|\btop[ -]line\b', re.IGNORECASE)
     _ebitda_kw     = re.compile(r'\bebitda\b', re.IGNORECASE)
     _margin_kw     = re.compile(r'\bmargin\b', re.IGNORECASE)
@@ -136,16 +147,20 @@ def detect_narrative_gaps(
         m = _dollar_pat.search(s)
         if not m:
             return None
-        num = float(m.group(1).replace(",", ""))
-        suffix = (m.group(2) or "").upper()
+        num = float(m.group("dnum").replace(",", ""))
+        suffix = (m.group("dunit") or "").upper()
         mult = {"M": 1e6, "MM": 1e6, "MILLION": 1e6,
                 "B": 1e9, "BN": 1e9, "BILLION": 1e9,
                 "K": 1e3, "THOUSAND": 1e3}
-        return num * mult.get(suffix, 1.0)
+        val = num * mult.get(suffix, 1.0)
+        return -val if m.group("dsign") else val
 
     def _parse_pct(s: str) -> Optional[float]:
         m = _pct_pat.search(s)
-        return float(m.group(1)) / 100.0 if m else None
+        if not m:
+            return None
+        val = float(m.group("pnum")) / 100.0
+        return -val if m.group("psign") else val
 
     def _fmt_pct(v: Optional[float]) -> str:
         return f"{v:.1%}" if v is not None else "N/A"
@@ -153,13 +168,15 @@ def detect_narrative_gaps(
     def _fmt_dollar(v: Optional[float]) -> str:
         if v is None:
             return "N/A"
-        if v >= 1e9:
-            return f"${v/1e9:.2f}B"
-        if v >= 1e6:
-            return f"${v/1e6:.1f}M"
-        if v >= 1e3:
-            return f"${v/1e3:.0f}K"
-        return f"${v:,.0f}"
+        sign = "-" if v < 0 else ""
+        av = abs(v)
+        if av >= 1e9:
+            return f"{sign}${av/1e9:.2f}B"
+        if av >= 1e6:
+            return f"{sign}${av/1e6:.1f}M"
+        if av >= 1e3:
+            return f"{sign}${av/1e3:.0f}K"
+        return f"{sign}${av:,.0f}"
 
     def _add(claim, source, extracted_val, status, gap_desc, severity):
         gaps.append({
@@ -171,7 +188,7 @@ def detect_narrative_gaps(
             "severity":        severity,
         })
 
-    # ── Per-sentence quantitative checks ──────────────────────────────────
+    # ── Per-sentence quantitative checks (elif = one metric per sentence) ───
     sentences = _split_sentences(memo_text)
     seen = {k: False for k in ("revenue", "ebitda", "ebitda_margin", "gross_margin",
                                 "cagr", "recurring_pct", "retention")}
@@ -181,145 +198,152 @@ def detect_narrative_gaps(
         if len(s) < 15:
             continue
 
-        # Revenue dollar claim
-        if not seen["revenue"] and _rev_kw.search(s):
-            dollar = _parse_dollar(s)
-            if dollar and dollar > 0:
-                seen["revenue"] = True
-                if rev_ltm is None:
-                    _add(f"Revenue {_fmt_dollar(dollar)}", source,
-                         "N/A (not extracted)", "unverifiable", None, "info")
-                else:
-                    delta = abs(dollar - rev_ltm) / max(abs(rev_ltm), 1)
-                    if delta <= 0.10:
-                        _add(f"Revenue {_fmt_dollar(dollar)}", source,
-                             f"rev.ltm = {_fmt_dollar(rev_ltm)}", "confirmed", None, "info")
-                    else:
-                        sev = "warning" if delta <= 0.30 else "critical"
-                        _add(f"Revenue {_fmt_dollar(dollar)}", source,
-                             f"rev.ltm = {_fmt_dollar(rev_ltm)}", "discrepancy",
-                             f"Memo claims {_fmt_dollar(dollar)} but extracted LTM = {_fmt_dollar(rev_ltm)} (Δ {delta:.0%})",
-                             sev)
-
-        # EBITDA dollar claim (not margin, not a sentence primarily about revenue)
-        if not seen["ebitda"] and _ebitda_kw.search(s) and not _margin_kw.search(s) and not _rev_kw.search(s):
-            dollar = _parse_dollar(s)
-            if dollar and dollar > 0:
-                seen["ebitda"] = True
-                if ebitda_ltm is None:
-                    _add(f"EBITDA {_fmt_dollar(dollar)}", source,
-                         "N/A (not extracted)", "unverifiable", None, "info")
-                else:
-                    delta = abs(dollar - ebitda_ltm) / max(abs(ebitda_ltm), 1)
-                    if delta <= 0.15:
-                        _add(f"EBITDA {_fmt_dollar(dollar)}", source,
-                             f"ebitda.ltm = {_fmt_dollar(ebitda_ltm)}", "confirmed", None, "info")
-                    else:
-                        sev = "warning" if delta <= 0.30 else "critical"
-                        _add(f"EBITDA {_fmt_dollar(dollar)}", source,
-                             f"ebitda.ltm = {_fmt_dollar(ebitda_ltm)}", "discrepancy",
-                             f"Memo claims {_fmt_dollar(dollar)} but extracted = {_fmt_dollar(ebitda_ltm)} (Δ {delta:.0%})",
-                             sev)
-
-        # EBITDA margin %
-        if not seen["ebitda_margin"] and _ebitda_kw.search(s) and _margin_kw.search(s):
-            pct = _parse_pct(s)
-            if pct is not None:
-                seen["ebitda_margin"] = True
-                if ebitda_margin is None:
-                    _add(f"EBITDA margin {_fmt_pct(pct)}", source,
-                         "N/A (not extracted)", "unverifiable", None, "info")
-                else:
-                    diff = abs(pct - ebitda_margin)
-                    if diff <= 0.03:
+        # Priority 1: EBITDA margin — requires both "ebitda" AND "margin"
+        if _ebitda_kw.search(s) and _margin_kw.search(s):
+            if not seen["ebitda_margin"]:
+                pct = _parse_pct(s)
+                if pct is not None:
+                    seen["ebitda_margin"] = True
+                    if ebitda_margin is None:
                         _add(f"EBITDA margin {_fmt_pct(pct)}", source,
-                             f"ebitda.margin_ltm = {_fmt_pct(ebitda_margin)}", "confirmed", None, "info")
+                             "N/A (not extracted)", "unverifiable", None, "info")
                     else:
-                        sev = "warning" if diff <= 0.08 else "critical"
-                        _add(f"EBITDA margin {_fmt_pct(pct)}", source,
-                             f"ebitda.margin_ltm = {_fmt_pct(ebitda_margin)}", "discrepancy",
-                             f"Memo claims {_fmt_pct(pct)} but extracted margin = {_fmt_pct(ebitda_margin)} (diff {diff:.1%})",
-                             sev)
+                        diff = abs(pct - ebitda_margin)
+                        if diff <= 0.03:
+                            _add(f"EBITDA margin {_fmt_pct(pct)}", source,
+                                 f"ebitda.margin_ltm = {_fmt_pct(ebitda_margin)}", "confirmed", None, "info")
+                        else:
+                            sev = "warning" if diff <= 0.08 else "critical"
+                            _add(f"EBITDA margin {_fmt_pct(pct)}", source,
+                                 f"ebitda.margin_ltm = {_fmt_pct(ebitda_margin)}", "discrepancy",
+                                 f"Memo claims {_fmt_pct(pct)} but extracted margin = {_fmt_pct(ebitda_margin)} (diff {diff:.1%})",
+                                 sev)
 
-        # Gross margin %
-        if not seen["gross_margin"] and _gross_kw.search(s) and _margin_kw.search(s):
-            pct = _parse_pct(s)
-            if pct is not None and pct > 0.05:
-                seen["gross_margin"] = True
-                if gross_margin is None:
-                    _add(f"Gross margin {_fmt_pct(pct)}", source,
-                         "N/A (not extracted)", "unverifiable", None, "info")
-                else:
-                    diff = abs(pct - gross_margin)
-                    if diff <= 0.03:
+        # Priority 2: Gross margin — "gross" + "margin", NOT "ebitda"
+        elif _gross_kw.search(s) and _margin_kw.search(s) and not _ebitda_kw.search(s):
+            if not seen["gross_margin"]:
+                pct = _parse_pct(s)
+                if pct is not None and pct > 0.05:
+                    seen["gross_margin"] = True
+                    if gross_margin is None:
                         _add(f"Gross margin {_fmt_pct(pct)}", source,
-                             f"fin.gross_margin = {_fmt_pct(gross_margin)}", "confirmed", None, "info")
+                             "N/A (not extracted)", "unverifiable", None, "info")
                     else:
-                        sev = "warning" if diff <= 0.08 else "critical"
-                        _add(f"Gross margin {_fmt_pct(pct)}", source,
-                             f"fin.gross_margin = {_fmt_pct(gross_margin)}", "discrepancy",
-                             f"Memo claims {_fmt_pct(pct)} but extracted = {_fmt_pct(gross_margin)} (diff {diff:.1%})",
-                             sev)
+                        diff = abs(pct - gross_margin)
+                        if diff <= 0.03:
+                            _add(f"Gross margin {_fmt_pct(pct)}", source,
+                                 f"fin.gross_margin = {_fmt_pct(gross_margin)}", "confirmed", None, "info")
+                        else:
+                            sev = "warning" if diff <= 0.08 else "critical"
+                            _add(f"Gross margin {_fmt_pct(pct)}", source,
+                                 f"fin.gross_margin = {_fmt_pct(gross_margin)}", "discrepancy",
+                                 f"Memo claims {_fmt_pct(pct)} but extracted = {_fmt_pct(gross_margin)} (diff {diff:.1%})",
+                                 sev)
 
-        # CAGR / growth rate %
-        if not seen["cagr"] and _cagr_kw.search(s):
-            pct = _parse_pct(s)
-            if pct is not None:
-                seen["cagr"] = True
-                if cagr_3yr is None:
-                    _add(f"Revenue CAGR {_fmt_pct(pct)}", source,
-                         "N/A (not extracted)", "unverifiable", None, "info")
-                else:
-                    diff = abs(pct - cagr_3yr)
-                    if diff <= 0.05:
+        # Priority 3: CAGR / growth rate
+        elif _cagr_kw.search(s):
+            if not seen["cagr"]:
+                pct = _parse_pct(s)
+                if pct is not None:
+                    seen["cagr"] = True
+                    if cagr_3yr is None:
                         _add(f"Revenue CAGR {_fmt_pct(pct)}", source,
-                             f"rev.cagr_3yr = {_fmt_pct(cagr_3yr)}", "confirmed", None, "info")
+                             "N/A (not extracted)", "unverifiable", None, "info")
                     else:
-                        sev = "warning" if diff <= 0.15 else "critical"
-                        _add(f"Revenue CAGR {_fmt_pct(pct)}", source,
-                             f"rev.cagr_3yr = {_fmt_pct(cagr_3yr)}", "discrepancy",
-                             f"Memo claims {_fmt_pct(pct)} CAGR but extracted 3yr CAGR = {_fmt_pct(cagr_3yr)} (diff {diff:.1%})",
-                             sev)
+                        diff = abs(pct - cagr_3yr)
+                        if diff <= 0.05:
+                            _add(f"Revenue CAGR {_fmt_pct(pct)}", source,
+                                 f"rev.cagr_3yr = {_fmt_pct(cagr_3yr)}", "confirmed", None, "info")
+                        else:
+                            sev = "warning" if diff <= 0.15 else "critical"
+                            _add(f"Revenue CAGR {_fmt_pct(pct)}", source,
+                                 f"rev.cagr_3yr = {_fmt_pct(cagr_3yr)}", "discrepancy",
+                                 f"Memo claims {_fmt_pct(pct)} CAGR but extracted 3yr CAGR = {_fmt_pct(cagr_3yr)} (diff {diff:.1%})",
+                                 sev)
 
-        # Recurring revenue %
-        if not seen["recurring_pct"] and _recurring_kw.search(s):
-            pct = _parse_pct(s)
-            if pct is not None and 0.10 < pct <= 1.0:
-                seen["recurring_pct"] = True
-                if recurring_rev_pct is None:
-                    _add(f"Recurring revenue {_fmt_pct(pct)}", source,
-                         "N/A (not extracted)", "unverifiable", None, "info")
-                else:
-                    diff = abs(pct - recurring_rev_pct)
-                    if diff <= 0.05:
+        # Priority 4: Recurring revenue — NOT ebitda/gross sentences
+        elif _recurring_kw.search(s) and not _ebitda_kw.search(s) and not _gross_kw.search(s):
+            if not seen["recurring_pct"]:
+                pct = _parse_pct(s)
+                if pct is not None and 0.05 < pct <= 1.0:
+                    seen["recurring_pct"] = True
+                    if recurring_rev_pct is None:
                         _add(f"Recurring revenue {_fmt_pct(pct)}", source,
-                             f"recurring_revenue_pct = {_fmt_pct(recurring_rev_pct)}", "confirmed", None, "info")
+                             "N/A (not extracted)", "unverifiable", None, "info")
                     else:
-                        sev = "warning" if diff <= 0.15 else "critical"
-                        _add(f"Recurring revenue {_fmt_pct(pct)}", source,
-                             f"recurring_revenue_pct = {_fmt_pct(recurring_rev_pct)}", "discrepancy",
-                             f"Memo claims {_fmt_pct(pct)} recurring but extracted = {_fmt_pct(recurring_rev_pct)} (diff {diff:.1%})",
-                             sev)
+                        diff = abs(pct - recurring_rev_pct)
+                        if diff <= 0.05:
+                            _add(f"Recurring revenue {_fmt_pct(pct)}", source,
+                                 f"recurring_revenue_pct = {_fmt_pct(recurring_rev_pct)}", "confirmed", None, "info")
+                        else:
+                            sev = "warning" if diff <= 0.15 else "critical"
+                            _add(f"Recurring revenue {_fmt_pct(pct)}", source,
+                                 f"recurring_revenue_pct = {_fmt_pct(recurring_rev_pct)}", "discrepancy",
+                                 f"Memo claims {_fmt_pct(pct)} recurring but extracted = {_fmt_pct(recurring_rev_pct)} (diff {diff:.1%})",
+                                 sev)
 
-        # Customer retention %
-        if not seen["retention"] and _retention_kw.search(s):
-            pct = _parse_pct(s)
-            if pct is not None and 0.50 < pct <= 1.0:
-                seen["retention"] = True
-                if retention is None:
-                    _add(f"Customer retention {_fmt_pct(pct)}", source,
-                         "N/A (not extracted)", "unverifiable", None, "info")
-                else:
-                    diff = abs(pct - retention)
-                    if diff <= 0.05:
+        # Priority 5: Customer retention
+        elif _retention_kw.search(s):
+            if not seen["retention"]:
+                pct = _parse_pct(s)
+                if pct is not None and 0.50 < pct <= 1.0:
+                    seen["retention"] = True
+                    if retention is None:
                         _add(f"Customer retention {_fmt_pct(pct)}", source,
-                             f"customers.customer_retention = {_fmt_pct(retention)}", "confirmed", None, "info")
+                             "N/A (not extracted)", "unverifiable", None, "info")
                     else:
-                        sev = "warning" if diff <= 0.10 else "critical"
-                        _add(f"Customer retention {_fmt_pct(pct)}", source,
-                             f"customers.customer_retention = {_fmt_pct(retention)}", "discrepancy",
-                             f"Memo claims {_fmt_pct(pct)} retention but extracted = {_fmt_pct(retention)} (diff {diff:.1%})",
-                             sev)
+                        diff = abs(pct - retention)
+                        if diff <= 0.05:
+                            _add(f"Customer retention {_fmt_pct(pct)}", source,
+                                 f"customers.customer_retention = {_fmt_pct(retention)}", "confirmed", None, "info")
+                        else:
+                            sev = "warning" if diff <= 0.10 else "critical"
+                            _add(f"Customer retention {_fmt_pct(pct)}", source,
+                                 f"customers.customer_retention = {_fmt_pct(retention)}", "discrepancy",
+                                 f"Memo claims {_fmt_pct(pct)} retention but extracted = {_fmt_pct(retention)} (diff {diff:.1%})",
+                                 sev)
+
+        # Priority 6: EBITDA dollar — "ebitda" without "margin" keyword
+        elif _ebitda_kw.search(s) and not _margin_kw.search(s):
+            if not seen["ebitda"]:
+                dollar = _parse_dollar(s)
+                if dollar is not None and dollar != 0:
+                    seen["ebitda"] = True
+                    if ebitda_ltm is None:
+                        _add(f"EBITDA {_fmt_dollar(dollar)}", source,
+                             "N/A (not extracted)", "unverifiable", None, "info")
+                    else:
+                        delta = abs(dollar - ebitda_ltm) / max(abs(ebitda_ltm), 1)
+                        if delta <= 0.15:
+                            _add(f"EBITDA {_fmt_dollar(dollar)}", source,
+                                 f"ebitda.ltm = {_fmt_dollar(ebitda_ltm)}", "confirmed", None, "info")
+                        else:
+                            sev = "warning" if delta <= 0.30 else "critical"
+                            _add(f"EBITDA {_fmt_dollar(dollar)}", source,
+                                 f"ebitda.ltm = {_fmt_dollar(ebitda_ltm)}", "discrepancy",
+                                 f"Memo claims {_fmt_dollar(dollar)} but extracted = {_fmt_dollar(ebitda_ltm)} (Δ {delta:.0%})",
+                                 sev)
+
+        # Priority 7: Revenue dollar — broadest, only if no ebitda/gross keywords
+        elif _rev_kw.search(s) and not _ebitda_kw.search(s) and not _gross_kw.search(s):
+            if not seen["revenue"]:
+                dollar = _parse_dollar(s)
+                if dollar and dollar > 0:
+                    seen["revenue"] = True
+                    if rev_ltm is None:
+                        _add(f"Revenue {_fmt_dollar(dollar)}", source,
+                             "N/A (not extracted)", "unverifiable", None, "info")
+                    else:
+                        delta = abs(dollar - rev_ltm) / max(abs(rev_ltm), 1)
+                        if delta <= 0.10:
+                            _add(f"Revenue {_fmt_dollar(dollar)}", source,
+                                 f"rev.ltm = {_fmt_dollar(rev_ltm)}", "confirmed", None, "info")
+                        else:
+                            sev = "warning" if delta <= 0.30 else "critical"
+                            _add(f"Revenue {_fmt_dollar(dollar)}", source,
+                                 f"rev.ltm = {_fmt_dollar(rev_ltm)}", "discrepancy",
+                                 f"Memo claims {_fmt_dollar(dollar)} but extracted LTM = {_fmt_dollar(rev_ltm)} (Δ {delta:.0%})",
+                                 sev)
 
     # ── Qualitative keyword checks ─────────────────────────────────────────
     memo_lower = memo_text.lower()
