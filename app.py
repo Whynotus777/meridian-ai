@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 import time
+import zipfile
 from typing import Optional
 
 import streamlit as st
@@ -414,6 +415,15 @@ if "analyzed_deals" not in st.session_state:
     st.session_state["analyzed_deals"] = []
 if "_pipeline_inline_upload" not in st.session_state:
     st.session_state["_pipeline_inline_upload"] = False
+if "firm_mandate" not in st.session_state:
+    st.session_state["firm_mandate"] = {
+        "firm_name": "",
+        "target_revenue_min_m": 0.0,
+        "target_revenue_max_m": 10000.0,
+        "min_ebitda_margin_pct": 0.0,
+        "target_sectors": [],
+        "min_recurring_revenue_pct": 0.0,
+    }
 
 # Configure panel state
 if "_scoring_profile" not in st.session_state:
@@ -502,6 +512,174 @@ def _fmt_pct(val) -> str:
         return f"{float(val):.1%}"
     except (ValueError, TypeError):
         return str(val)
+
+
+def _to_float_or_none(val):
+    if val is None or val == "not_provided":
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _downgrade_recommendation(rec: str) -> str:
+    ladder = [
+        "Strong Pursue",
+        "Pursue",
+        "Conditional",
+        "Likely Pass — significant concerns",
+        "Pass",
+    ]
+    if rec not in ladder:
+        return rec
+    idx = ladder.index(rec)
+    return ladder[min(idx + 1, len(ladder) - 1)]
+
+
+def _evaluate_mandate_fit(extracted_data: dict, mandate: dict) -> dict:
+    co = extracted_data.get("company_overview", {})
+    fin = extracted_data.get("financials", {})
+    ebitda = fin.get("ebitda", {})
+    rev_ltm = _to_float_or_none(fin.get("revenue", {}).get("ltm"))
+    ebitda_margin = _to_float_or_none(ebitda.get("margin_ltm"))
+    recurring = _to_float_or_none(fin.get("recurring_revenue_pct"))
+    sector = (co.get("industry") or "").strip()
+    sub_sector = (co.get("sub_industry") or "").strip()
+    selected_profile = (st.session_state.get("industry_profile") or "").strip()
+
+    if ebitda_margin is None and rev_ltm and rev_ltm != 0:
+        ebitda_candidate = (
+            _to_float_or_none(ebitda.get("ltm"))
+            or _to_float_or_none(ebitda.get("adjusted_ebitda_ltm"))
+            or _to_float_or_none(ebitda.get("derived_ebitda"))
+        )
+        if ebitda_candidate is not None:
+            ebitda_margin = ebitda_candidate / rev_ltm
+
+    crit = []
+    rev_min_m = float(mandate.get("target_revenue_min_m", 0) or 0)
+    rev_max_m = float(mandate.get("target_revenue_max_m", 10000) or 10000)
+    min_margin_pct = float(mandate.get("min_ebitda_margin_pct", 0) or 0)
+    min_rec_pct = float(mandate.get("min_recurring_revenue_pct", 0) or 0)
+    sectors = mandate.get("target_sectors") or []
+
+    if rev_min_m > 0 or rev_max_m < 10000:
+        if rev_ltm is None:
+            crit.append((False, f"❌ Revenue not provided; target range is ${rev_min_m:.0f}M-${rev_max_m:.0f}M"))
+        else:
+            rev_m = rev_ltm / 1_000_000
+            passed = rev_min_m <= rev_m <= rev_max_m
+            if passed:
+                crit.append((True, f"✅ Revenue ${rev_m:.0f}M within ${rev_min_m:.0f}M-${rev_max_m:.0f}M range"))
+            else:
+                crit.append((False, f"❌ Revenue ${rev_m:.0f}M outside ${rev_min_m:.0f}M-${rev_max_m:.0f}M range"))
+
+    if min_margin_pct > 0:
+        if ebitda_margin is None:
+            crit.append((False, f"❌ EBITDA margin not provided; minimum is {min_margin_pct:.1f}%"))
+        else:
+            margin_pct = ebitda_margin * 100
+            passed = margin_pct >= min_margin_pct
+            if passed:
+                crit.append((True, f"✅ EBITDA margin {margin_pct:.1f}% meets {min_margin_pct:.1f}% minimum"))
+            else:
+                crit.append((False, f"❌ EBITDA margin {margin_pct:.1f}% below {min_margin_pct:.1f}% minimum"))
+
+    if sectors:
+        # Fuzzy matching over extracted industry + sub-industry + user-selected profile
+        candidates = [x for x in [sector, sub_sector, selected_profile] if x]
+        candidates_lc = [c.lower() for c in candidates]
+
+        # Common extracted-label variations -> mandate sectors
+        variation_map = {
+            "software": ["Enterprise Software"],
+            "enterprise software": ["Enterprise Software"],
+            "saas": ["Enterprise Software"],
+            "education technology": ["Education & EdTech"],
+            "edtech": ["Education & EdTech"],
+            "education": ["Education & EdTech"],
+            "learning": ["Education & EdTech"],
+            "healthcare": ["Healthcare"],
+            "healthcare it": ["Healthcare"],
+            "fintech": ["Fintech"],
+            "financial services": ["Fintech"],
+            "industrial": ["Industrials"],
+            "consumer": ["Consumer"],
+            "cyber": ["Cybersecurity"],
+            "cybersecurity": ["Cybersecurity"],
+            "infrastructure": ["Infrastructure"],
+            "gaming": ["Gaming & Entertainment"],
+            "entertainment": ["Gaming & Entertainment"],
+        }
+
+        sector_keywords = {
+            "Healthcare": ["healthcare", "health tech", "healthtech", "medical", "provider"],
+            "Education & EdTech": ["education", "edtech", "learning", "school", "student", "k-12", "k12", "curriculum", "lms"],
+            "Enterprise Software": ["enterprise software", "software", "saas", "b2b software", "platform"],
+            "Fintech": ["fintech", "financial services", "payments", "banking", "lending"],
+            "Industrials": ["industrial", "manufacturing", "factory", "logistics"],
+            "Consumer": ["consumer", "retail", "ecommerce", "e-commerce", "d2c"],
+            "Cybersecurity": ["cybersecurity", "cyber", "security software", "infosec"],
+            "Infrastructure": ["infrastructure", "data center", "utilities", "network infrastructure"],
+            "Gaming & Entertainment": ["gaming", "entertainment", "media", "esports"],
+            "Other": ["other"],
+        }
+
+        matched_targets = set()
+
+        # Direct contains/equality checks against selected mandate sectors
+        for target in sectors:
+            tl = target.lower()
+            if any(tl in c for c in candidates_lc):
+                matched_targets.add(target)
+
+        # Keyword-based matching to canonical mandate sectors
+        for target in sectors:
+            kws = sector_keywords.get(target, [])
+            if any(any(kw in c for kw in kws) for c in candidates_lc):
+                matched_targets.add(target)
+
+        # Variation map matching
+        for c in candidates_lc:
+            for variant, mapped_targets in variation_map.items():
+                if variant in c:
+                    for mt in mapped_targets:
+                        if mt in sectors:
+                            matched_targets.add(mt)
+
+        passed = len(matched_targets) > 0
+        if passed:
+            match_list = ", ".join(sorted(matched_targets))
+            crit.append((True, f"✅ Sector match via: {match_list}"))
+        else:
+            crit.append((
+                False,
+                f"❌ Sector mismatch. Extracted: '{sector or 'Unknown'}'"
+                f"{f' / {sub_sector}' if sub_sector else ''}; Profile: '{selected_profile or 'General'}'"
+            ))
+
+    if min_rec_pct > 0:
+        if recurring is None:
+            crit.append((False, f"❌ Recurring revenue not provided; minimum is {min_rec_pct:.1f}%"))
+        else:
+            rec_pct = recurring * 100
+            passed = rec_pct >= min_rec_pct
+            if passed:
+                crit.append((True, f"✅ Recurring revenue {rec_pct:.1f}% meets {min_rec_pct:.1f}% minimum"))
+            else:
+                crit.append((False, f"❌ Recurring revenue {rec_pct:.1f}% below {min_rec_pct:.1f}% minimum"))
+
+    total = len(crit)
+    passed_n = sum(1 for p, _ in crit if p)
+    fit_pct = int(round((passed_n / total) * 100)) if total else None
+    failed_n = total - passed_n
+    return {
+        "criteria": crit,
+        "fit_pct": fit_pct,
+        "failed_n": failed_n,
+        "active_criteria": total,
+    }
 
 
 def _fmt_str(val) -> str:
@@ -1761,6 +1939,71 @@ with st.sidebar:
         for _sec_key, _sec_label in _MEMO_SECTION_LABELS:
             st.checkbox(_sec_label, key=f"_msec_{_sec_key}")
 
+        st.markdown("---")
+        st.markdown(
+            "<div class='section-label'>Investment Mandate</div>",
+            unsafe_allow_html=True,
+        )
+        _fm_name = st.text_input(
+            "Firm Name",
+            value=st.session_state["firm_mandate"].get("firm_name", ""),
+            placeholder="e.g., ETS Capital",
+            key="_fm_firm_name",
+        )
+        _fm_rev_min = st.number_input(
+            "Target Revenue Min ($M)",
+            min_value=0.0,
+            value=float(st.session_state["firm_mandate"].get("target_revenue_min_m", 0.0)),
+            step=10.0,
+            key="_fm_rev_min",
+        )
+        _fm_rev_max = st.number_input(
+            "Target Revenue Max ($M)",
+            min_value=0.0,
+            value=float(st.session_state["firm_mandate"].get("target_revenue_max_m", 10000.0)),
+            step=10.0,
+            key="_fm_rev_max",
+        )
+        _fm_min_margin = st.number_input(
+            "Min EBITDA Margin (%)",
+            min_value=0.0,
+            value=float(st.session_state["firm_mandate"].get("min_ebitda_margin_pct", 0.0)),
+            step=1.0,
+            key="_fm_min_margin",
+        )
+        _fm_sectors = st.multiselect(
+            "Target Sectors",
+            options=[
+                "Healthcare",
+                "Education & EdTech",
+                "Enterprise Software",
+                "Fintech",
+                "Industrials",
+                "Consumer",
+                "Cybersecurity",
+                "Infrastructure",
+                "Gaming & Entertainment",
+                "Other",
+            ],
+            default=st.session_state["firm_mandate"].get("target_sectors", []),
+            key="_fm_sectors",
+        )
+        _fm_min_rec = st.number_input(
+            "Min Recurring Revenue (%)",
+            min_value=0.0,
+            value=float(st.session_state["firm_mandate"].get("min_recurring_revenue_pct", 0.0)),
+            step=1.0,
+            key="_fm_min_rec",
+        )
+        st.session_state["firm_mandate"] = {
+            "firm_name": _fm_name.strip(),
+            "target_revenue_min_m": float(_fm_rev_min),
+            "target_revenue_max_m": float(_fm_rev_max),
+            "min_ebitda_margin_pct": float(_fm_min_margin),
+            "target_sectors": list(_fm_sectors),
+            "min_recurring_revenue_pct": float(_fm_min_rec),
+        }
+
     analyze_btn = st.button(
         "Analyze",
         type="primary",
@@ -1801,6 +2044,17 @@ with st.sidebar:
 
         # Deal score badge
         if ds:
+            _sidebar_rec = ds.recommendation
+            _sidebar_m_eval = _evaluate_mandate_fit(
+                result.extracted_data,
+                st.session_state.get("firm_mandate", {}),
+            )
+            if (
+                _sidebar_m_eval.get("active_criteria", 0) > 0
+                and _sidebar_m_eval.get("fit_pct") is not None
+                and _sidebar_m_eval.get("fit_pct") < 50
+            ):
+                _sidebar_rec = _downgrade_recommendation(_sidebar_rec)
             grade_colour = _score_colour(ds.total_score)
             st.markdown(
                 f"<p style='margin-bottom:0.1rem'><span style='font-size:0.75rem;"
@@ -1811,7 +2065,7 @@ with st.sidebar:
                 f"{ds.total_score:.0%} &nbsp;<span style='font-size:1rem'>"
                 f"Grade {ds.grade}</span></p>"
                 f"<p style='font-size:0.78rem;color:#8888aa;margin-top:0.1rem'>"
-                f"{ds.recommendation}</p>",
+                f"{_sidebar_rec}</p>",
                 unsafe_allow_html=True,
             )
 
@@ -1839,6 +2093,8 @@ with st.sidebar:
             st.session_state["_pptx_err"]    = None
             st.session_state["_json_bytes"]  = None
             st.session_state["_json_err"]    = None
+            st.session_state["_zip_bytes"]   = None
+            st.session_state["_zip_err"]     = None
             try:
                 st.session_state["_xlsx_bytes"] = _make_xlsx_bytes(result)
             except Exception as _e:
@@ -1857,6 +2113,39 @@ with st.sidebar:
                 st.session_state["_json_err"] = str(_e)
 
         company_slug = co.get("company_name", "analysis").replace(" ", "_")
+        if st.session_state.get("_zip_bytes") is None and st.session_state.get("_zip_err") is None:
+            try:
+                zip_buf = io.BytesIO()
+                wrote_any = False
+                with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    if st.session_state.get("_xlsx_bytes") is not None:
+                        zf.writestr(f"{company_slug}_analysis.xlsx", st.session_state["_xlsx_bytes"])
+                        wrote_any = True
+                    if st.session_state.get("_docx_bytes") is not None:
+                        zf.writestr(f"{company_slug}_memo.docx", st.session_state["_docx_bytes"])
+                        wrote_any = True
+                    if st.session_state.get("_pptx_bytes") is not None:
+                        zf.writestr(f"{company_slug}_ic_deck.pptx", st.session_state["_pptx_bytes"])
+                        wrote_any = True
+                if wrote_any:
+                    st.session_state["_zip_bytes"] = zip_buf.getvalue()
+                else:
+                    st.session_state["_zip_err"] = "No export files available to package."
+            except Exception as _e:
+                st.session_state["_zip_err"] = str(_e)
+
+        if st.session_state.get("_zip_bytes") is not None:
+            st.download_button(
+                label="📦 IC Package (.zip)",
+                data=st.session_state["_zip_bytes"],
+                file_name=f"{company_slug}_IC_Package.zip",
+                mime="application/zip",
+                width="stretch",
+                type="primary",
+            )
+            st.caption("Excel model + IC memo + IC deck")
+        else:
+            st.caption(f"IC Package unavailable: {st.session_state.get('_zip_err')}")
 
         if st.session_state["_xlsx_bytes"] is not None:
             st.download_button(
@@ -2261,6 +2550,53 @@ if st.session_state.result:
                     if risk.diligence_question:
                         st.info(f"**Diligence:** {_escape_dollars(risk.diligence_question)}")
 
+        # ── Section 3: Narrative Validation ──────────────────────────────
+        _ngaps = getattr(result, "narrative_gaps", None) or []
+        if _ngaps:
+            st.divider()
+            st.markdown("### Narrative Validation")
+            st.caption(
+                "Programmatic cross-check of memo claims against extracted financials. "
+                "No LLM involved — pure regex + arithmetic."
+            )
+            _ng_confirmed    = [g for g in _ngaps if g["status"] == "confirmed"]
+            _ng_discrepancy  = [g for g in _ngaps if g["status"] == "discrepancy"]
+            _ng_unverifiable = [g for g in _ngaps if g["status"] == "unverifiable"]
+
+            _nv_c1, _nv_c2, _nv_c3 = st.columns(3)
+            _nv_c1.metric("✅ Confirmed",     len(_ng_confirmed))
+            _nv_c2.metric("⚠️ Discrepancies", len(_ng_discrepancy))
+            _nv_c3.metric("❓ Unverifiable",   len(_ng_unverifiable))
+
+            if _ng_discrepancy:
+                for _g in sorted(_ng_discrepancy,
+                                  key=lambda x: {"critical": 0, "warning": 1}.get(x["severity"], 2)):
+                    _icon = "🔴" if _g["severity"] == "critical" else "🟡"
+                    with st.expander(
+                        f"{_icon} {_g['claim']}",
+                        expanded=(_g["severity"] == "critical"),
+                    ):
+                        st.markdown(f"**Source:** {_g['claim_source']}")
+                        st.markdown(f"**Extracted:** `{_g['extracted_value']}`")
+                        if _g.get("gap"):
+                            st.warning(_g["gap"])
+
+            if _ng_confirmed:
+                with st.expander(f"✅ {len(_ng_confirmed)} confirmed claim(s)", expanded=False):
+                    for _g in _ng_confirmed:
+                        st.markdown(
+                            f"- **{_g['claim']}** — {_g['extracted_value']} "
+                            f"*(source: {_g['claim_source']})*"
+                        )
+
+            if _ng_unverifiable:
+                with st.expander(f"❓ {len(_ng_unverifiable)} unverifiable claim(s)", expanded=False):
+                    for _g in _ng_unverifiable:
+                        st.markdown(
+                            f"- **{_g['claim']}** — {_g['extracted_value']} "
+                            f"*(source: {_g['claim_source']})*"
+                        )
+
         st.divider()
         st.markdown("### Diligence Risks from Memo")
         st.caption("Qualitative risks parsed from the investment memo.")
@@ -2416,6 +2752,15 @@ if st.session_state.result:
         if not ds:
             st.info("Deal scoring was disabled or not yet run.")
         else:
+            mandate = st.session_state.get("firm_mandate", {})
+            mandate_eval = _evaluate_mandate_fit(result.extracted_data, mandate)
+            mandate_fit = mandate_eval.get("fit_pct")
+            active_criteria = mandate_eval.get("active_criteria", 0)
+            failed_n = mandate_eval.get("failed_n", 0)
+            display_recommendation = ds.recommendation
+            if active_criteria > 0 and mandate_fit is not None and mandate_fit < 50:
+                display_recommendation = _downgrade_recommendation(display_recommendation)
+
             grade_col = _score_colour(ds.total_score)
             st.markdown(
                 f"""
@@ -2427,12 +2772,17 @@ if st.session_state.result:
                     <div style='font-size:1.3rem;color:#e8e8e8;margin-top:0.3rem'>
                         {ds.total_score:.0%} Overall Score</div>
                     <div style='font-size:0.95rem;color:#8888aa;margin-top:0.3rem'>
-                        {ds.recommendation}</div>
+                        {display_recommendation}</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
             st.caption(ds.summary)
+            if active_criteria > 0 and mandate_fit is not None and mandate_fit < 50:
+                firm_name = (mandate.get("firm_name") or "this firm").strip()
+                st.warning(
+                    f"⚠️ This deal falls outside {firm_name}'s investment mandate on {failed_n} criteria."
+                )
             st.markdown("---")
 
             st.markdown(
@@ -2453,6 +2803,20 @@ if st.session_state.result:
                 cc1.caption(dim.rationale)
                 cc2.caption(f"wt {dim.weight:.0%}  ·  data: {dim.data_quality.replace('_', ' ')}")
                 st.markdown("")
+
+            if active_criteria > 0 and mandate_fit is not None:
+                st.markdown("---")
+                st.markdown(
+                    "<div class='section-label'>Mandate Fit</div>",
+                    unsafe_allow_html=True,
+                )
+                firm_name = (mandate.get("firm_name") or "").strip()
+                if firm_name:
+                    st.markdown(f"**{firm_name} Mandate Fit: {mandate_fit}%**")
+                else:
+                    st.markdown(f"**Mandate Fit: {mandate_fit}%**")
+                for _passed, line in mandate_eval.get("criteria", []):
+                    st.markdown(line)
 
     # ── Tab: Q&A ──────────────────────────────────────────────────────────
     with tab_qa:

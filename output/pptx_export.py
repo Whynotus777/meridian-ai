@@ -217,6 +217,44 @@ def _with_currency(num_str: str, currency: str) -> str:
     return num_str.replace("$", f"{currency} ")
 
 
+def _clean_markdown(text: str) -> str:
+    """Strip markdown formatting for clean PPTX rendering."""
+    if not text:
+        return text
+    # Bold / italic markers
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'\*(.+?)\*',     r'\1', text, flags=re.DOTALL)
+    # Heading markers
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Horizontal rules
+    text = re.sub(r'^[-_]{3,}\s*$', '', text, flags=re.MULTILINE)
+    # Leading bullet markers (* - • ·) at start of lines
+    text = re.sub(r'^\s*[\*\-•·]\s+', '', text, flags=re.MULTILINE)
+    # Inline code backticks
+    text = re.sub(r'`+', '', text)
+    # Collapse excessive blank lines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def _parse_numbered_items(content: str, max_items: int = 8) -> List[str]:
+    """Extract only explicitly numbered or bulleted items; skip preamble prose."""
+    if not content:
+        return []
+    content = _clean_markdown(content)
+    items: List[str] = []
+    for line in content.split("\n"):
+        line = line.strip()
+        m = re.match(r'^(?:\d+[\.\)]\s+|\s*[\*\-•·]\s+)(.+)', line)
+        if m:
+            item = m.group(1).strip()
+            if len(item) > 15:
+                items.append(item)
+                if len(items) >= max_items:
+                    break
+    return items
+
+
 def _cite_page(obj: Any) -> Optional[int]:
     if not isinstance(obj, dict):
         return None
@@ -259,6 +297,7 @@ def _to_bullets(content: str, max_bullets: int = 6) -> List[str]:
     """Extract short bullet-worthy lines from prose content."""
     if not content:
         return []
+    content = _clean_markdown(content)
     bullets: List[str] = []
     for line in content.split("\n"):
         line = line.strip()
@@ -268,7 +307,11 @@ def _to_bullets(content: str, max_bullets: int = 6) -> List[str]:
         # Skip very short, very long, or intro-style lines
         if len(line) < 18 or len(line) > 260:
             continue
-        if re.match(r'.*(following|include:|as follows|below)', line, re.I) and len(line) < 80:
+        if re.match(
+            r'.*(following|include:|as follows|below|several risks|key risks|'
+            r'inherent|outlined below|are highlighted|questions include)',
+            line, re.I,
+        ) and len(line) < 120:
             continue
         bullets.append(line)
         if len(bullets) >= max_bullets:
@@ -460,8 +503,21 @@ def _slide_3(prs, sections: List[Dict], co: Dict) -> None:
     _header(slide, "Executive Summary")
     _footer(slide, 3)
 
-    content = _find_section(sections, "executive summary", "executive")
-    bullets = _to_bullets(content, 6)
+    raw_content = _clean_markdown(_find_section(sections, "executive summary", "executive"))
+    bullets: List[str] = []
+    if raw_content:
+        # Split on double-newlines to get paragraphs; flatten each to one line
+        for para in raw_content.split("\n\n"):
+            para = re.sub(r'\s*\n\s*', ' ', para).strip()
+            if not para or len(para) < 20:
+                continue
+            # Truncate long paragraphs to first sentence
+            if len(para) > 200:
+                m = re.search(r'^(.+?[.!?])\s', para)
+                para = m.group(1) if m else para[:200]
+            bullets.append(para)
+            if len(bullets) >= 6:
+                break
     if not bullets:
         bullets = _to_bullets(co.get("description", ""), 4)
     if not bullets:
@@ -883,9 +939,18 @@ def _slide_9(prs, comps, market: Dict) -> None:
                 _label(slide, val, cx + Inches(0.08), ry + Inches(0.05),
                        cw - Inches(0.14), row_h - Inches(0.08), size=9.5, color=_BLACK)
                 cx += cw
+
+        # Always show identified peers from extraction below the comps table
+        key_competitors = [c for c in (market.get("key_competitors") or []) if c]
+        if key_competitors:
+            peers_y = table_y + Inches(0.32) + min(len(comps), 12) * row_h + Inches(0.18)
+            peer_str = "Identified Peers: " + ",  ".join(str(c) for c in key_competitors[:8])
+            _label(slide, peer_str,
+                   _MARGIN, peers_y, _W - _MARGIN * 2, Inches(0.30),
+                   size=9.5, color=_DARK_GREY, italic=True)
     else:
         # Show key competitors from market extraction instead
-        key_competitors = market.get("key_competitors", [])
+        key_competitors = [c for c in (market.get("key_competitors") or []) if c]
         _label(slide,
                "No comparable companies identified in this document.\n"
                "Comparable analysis requires PitchBook / Capital IQ API for sector transaction multiples.",
@@ -997,7 +1062,8 @@ def _slide_11(prs, sections: List[Dict], ds) -> None:
 
     content   = _find_section(sections, "diligence", "due diligence",
                                "key questions", "key diligence")
-    questions = _to_bullets(content, 7)
+    # Prefer explicitly numbered/bulleted items to avoid preamble prose
+    questions = _parse_numbered_items(content, 7) or _to_bullets(content, 7)
     if not questions:
         questions = [
             "Validate revenue quality: verify recurring vs. one-time revenue split.",
