@@ -451,11 +451,17 @@ def _revenue_ltm_to_range(ltm_raw: Any) -> str:
 class MatchingEngine:
     """Scores PE funds against a CIM extraction dict.
 
-    Scoring weights (from notebook):
-        Industry fit:   30%
+    Scoring weights:
+        Industry fit:   40%   (raised from 30% — sector alignment is the key filter)
         Size fit:       25%
-        Geography:      15%
-        Strategic fit:  30%
+        Geography:      10%   (lowered from 15% — almost all funds cover NA, so
+                               geography is near-constant and adds little signal)
+        Strategic fit:  25%
+
+    A sector-mismatch PENALTY of -0.3 is applied to the raw industry score when
+    a fund has zero keyword or primary-industry overlap with the deal.  This
+    ensures software-only funds score poorly against gaming/hospitality/industrial
+    deals even if they otherwise look attractive on size or geography.
 
     Usage:
         engine = MatchingEngine()
@@ -529,12 +535,12 @@ class MatchingEngine:
             )
             all_reasons.extend(strat_reasons)
 
-            # Weighted composite (from notebook)
+            # Weighted composite — industry weight raised to 40%
             total = (
-                ind_score   * 0.30 +
+                ind_score   * 0.40 +
                 size_score  * 0.25 +
-                geo_score   * 0.15 +
-                strat_score * 0.30
+                geo_score   * 0.10 +
+                strat_score * 0.25
             )
 
             matches.append(FundMatch(
@@ -549,7 +555,25 @@ class MatchingEngine:
             ))
 
         matches.sort(key=lambda m: m.total_score, reverse=True)
-        return matches[:top_n]
+        top = matches[:top_n]
+
+        # ── Low-coverage warning ──────────────────────────────────────────
+        # If the best industry score across ALL funds is < 0.2, the database
+        # has little to no coverage for this sector.  Attach a warning to
+        # each returned match so the UI can surface it.
+        best_ind = max((m.industry_score for m in matches), default=0.0)
+        if best_ind < 0.2:
+            sector_label = industry or sub_industry or "this sector"
+            warning = (
+                f"Limited fund coverage for {sector_label} — "
+                "no funds in the database have a stated focus in this industry. "
+                "Results shown are best-available but may not be relevant."
+            )
+            for m in top:
+                if warning not in m.concerns:
+                    m.concerns.insert(0, warning)
+
+        return top
 
     # ------------------------------------------------------------------
     # Dimension scorers — logic from notebook, parameters adapted
@@ -562,7 +586,15 @@ class MatchingEngine:
         keywords: List[str],
         fund: PEFund,
     ) -> Tuple[float, List[str]]:
-        """Score industry alignment using keyword matching (notebook verbatim)."""
+        """Score industry alignment using keyword matching.
+
+        Scoring:
+          +0.70  primary industry match (fund.industry_focus ↔ deal industry)
+          +0.10  per sector-keyword match (capped at +0.30)
+          -0.30  mismatch penalty — fund's focus is entirely unrelated
+                 (e.g. software fund vs gaming/hospitality deal).
+                 Applied only when BOTH primary match AND keyword match are zero.
+        """
         score = 0.0
         reasons: List[str] = []
 
@@ -587,6 +619,15 @@ class MatchingEngine:
             bonus = min(0.3, keyword_matches * 0.10)
             score = min(1.0, score + bonus)
             reasons.append(f"Sector keyword alignment ({keyword_matches} matches)")
+
+        # Mismatch penalty — fund focus is entirely unrelated to the deal
+        if score == 0.0:
+            score = -0.30
+            fund_sectors = ", ".join(fund.industry_focus[:3])
+            reasons.append(
+                f"Sector mismatch: fund focuses on {fund_sectors}; "
+                f"deal is {industry or 'unclassified'}"
+            )
 
         return score, reasons
 

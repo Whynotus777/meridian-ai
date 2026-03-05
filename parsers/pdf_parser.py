@@ -120,21 +120,39 @@ class PDFParser:
         doc = fitz.open(filepath)
         total_pages = min(len(doc), self.max_pages)
 
+        # Extract metadata while the doc is already open (avoids a second fitz.open)
+        meta = self._extract_metadata_from_doc(doc)
+
         sections = []
         all_text_parts = []
         all_tables = []
+        tables_found_so_far = 0
+        pages_scanned_for_tables = 0
+        _MAX_TABLE_SCAN_PAGES = 15  # cap: find_tables() on at most 15 pages per doc
 
         for page_num in range(total_pages):
             page = doc[page_num]
+            page_text_clean = self._clean_text(page.get_text("text"))
 
-            # Extract tables (native, no extra file I/O)
-            page_tables = []
-            if self.extract_tables:
-                page_tables = self._extract_tables_fitz(page, page_num)
+            # Returns (ExtractedTable, y0) pairs — single find_tables() call per page
+            page_table_pairs: List[Tuple[ExtractedTable, float]] = []
+            if (
+                self.extract_tables
+                and pages_scanned_for_tables < _MAX_TABLE_SCAN_PAGES
+                and self._should_scan_for_tables(
+                    page_text_clean, page_num, tables_found_so_far
+                )
+            ):
+                page_table_pairs = self._extract_tables_fitz(page, page_num)
+                pages_scanned_for_tables += 1
+
+            page_tables = [et for et, _ in page_table_pairs]
+            tables_found_so_far += len(page_tables)
 
             # Build page content: text blocks and table markdown ordered by y-position
+            # Pass pairs so _build_page_content reuses bboxes (no second find_tables)
             page_text_clean, combined_text = self._build_page_content(
-                page, page_tables
+                page, page_table_pairs, page_text_clean
             )
 
             # Attach context (nearby heading text) to each table
@@ -157,19 +175,20 @@ class PDFParser:
             sections=sections,
             tables=all_tables,
             raw_text="\n\n".join(all_text_parts),
-            metadata=self._extract_metadata_fitz(filepath),
+            metadata=meta,
         )
 
-    def _extract_tables_fitz(self, page, page_num: int) -> List[ExtractedTable]:
+    def _extract_tables_fitz(
+        self, page, page_num: int
+    ) -> List[Tuple["ExtractedTable", float]]:
         """Extract tables using PyMuPDF's native table finder.
 
-        Uses the already-open page object — zero additional file I/O.
-        Returns ExtractedTable objects in the same schema as the pdfplumber path.
+        Returns (ExtractedTable, y0) pairs so callers can order tables by
+        vertical position without a second find_tables() call.
         """
-        tables: List[ExtractedTable] = []
+        results: List[Tuple[ExtractedTable, float]] = []
         try:
-            tab_finder = page.find_tables()
-            for tab in tab_finder:
+            for tab in page.find_tables():
                 table_data = tab.extract()
                 if not table_data or len(table_data) < 2:
                     continue
@@ -180,64 +199,44 @@ class PDFParser:
                     if any(c for c in cleaned):
                         rows.append(cleaned)
                 if headers and rows:
-                    tables.append(ExtractedTable(
+                    et = ExtractedTable(
                         page_number=page_num + 1,
                         headers=headers,
                         rows=rows,
-                    ))
+                    )
+                    results.append((et, tab.bbox[1]))
         except Exception:
             pass  # Graceful degradation — tables are supplementary
-        return tables
+        return results
 
     def _build_page_content(
-        self, page, page_tables: List[ExtractedTable]
+        self,
+        page,
+        page_table_pairs: List[Tuple["ExtractedTable", float]],
+        plain_text: str,
     ) -> Tuple[str, str]:
         """Build per-page content by interleaving text and table markdown.
 
-        Returns (plain_text, combined_text) where combined_text has table
-        markdown inserted at the correct vertical position in the text stream.
-        This preserves document structure so the LLM sees tables in context.
+        Accepts (ExtractedTable, y0) pairs produced by _extract_tables_fitz so
+        that no second find_tables() call is needed.  Returns (plain_text,
+        combined_text) where combined_text has table markdown inserted at the
+        correct vertical position.
         """
-        # Plain text (used for context lookup and raw_text fallback)
-        plain_text = self._clean_text(page.get_text("text"))
-
-        if not page_tables:
+        if not page_table_pairs:
             return plain_text, plain_text
 
-        # Collect text blocks with y-position (top of block)
-        # block format: (x0, y0, x1, y1, text, block_no, block_type)
-        # block_type 0 = text, 1 = image
+        # Collect text blocks with y-position (block_type 0 = text, 1 = image)
         text_blocks: List[Tuple[float, str]] = []
         for block in page.get_text("blocks"):
-            if block[6] == 0 and block[4].strip():  # text blocks only
+            if block[6] == 0 and block[4].strip():
                 text_blocks.append((block[1], self._clean_text(block[4])))
 
-        # Map each ExtractedTable back to its fitz table bbox y0
-        # We do a second find_tables() call to get bboxes — cheap since it's in-memory
-        table_bboxes: List[Tuple[float, str]] = []
-        try:
-            for tab in page.find_tables():
-                table_data = tab.extract()
-                if not table_data or len(table_data) < 2:
-                    continue
-                headers = [str(c or "").strip() for c in table_data[0]]
-                # Match to our ExtractedTable by header equality
-                for et in page_tables:
-                    if et.headers == headers:
-                        md = et.to_markdown()
-                        table_bboxes.append((tab.bbox[1], md))
-                        break
-        except Exception:
-            pass
+        # Reuse pre-computed bboxes — no second find_tables() call
+        table_bboxes: List[Tuple[float, str]] = [
+            (y0, et.to_markdown()) for et, y0 in page_table_pairs
+        ]
 
-        if not table_bboxes:
-            # Can't match positions — append tables at end of page text
-            combined = plain_text
-            for et in page_tables:
-                combined += "\n\n" + et.to_markdown()
-            return plain_text, self._clean_text(combined)
-
-        # Merge text blocks and table markdown, ordered by vertical position
+        # Merge and sort by vertical position
         items: List[Tuple[float, str]] = text_blocks + table_bboxes
         items.sort(key=lambda x: x[0])
 
@@ -245,18 +244,62 @@ class PDFParser:
         combined = "\n\n".join(combined_parts)
         return plain_text, combined
 
-    def _extract_metadata_fitz(self, filepath: str) -> Dict[str, str]:
-        """Extract PDF metadata using PyMuPDF."""
+    def _should_scan_for_tables(
+        self,
+        page_text: str,
+        page_num: int,
+        tables_found_so_far: int,
+    ) -> bool:
+        """Fast heuristic to skip expensive find_tables on narrative-heavy pages."""
+        if not page_text:
+            return False
+
+        text = page_text.lower()
+        # Strong signals: likely true financial statement pages.
+        strong_table_signals = (
+            "consolidated statements",
+            "balance sheet",
+            "cash flow",
+            "statement of operations",
+            "statement of income",
+            "in millions",
+            "in thousands",
+            "amounts in",
+            "selected financial data",
+        )
+        if any(sig in text for sig in strong_table_signals):
+            return True
+
+        # If we reached deeper pages without finding any table, throttle hard.
+        if page_num >= 35 and tables_found_so_far == 0:
+            return False
+
+        # Numeric density + year density catches compact table pages.
+        digit_count = sum(ch.isdigit() for ch in page_text)
+        if digit_count < 180:
+            return False
+
+        # Year density alone is not enough — 10-K narrative sections mention years
+        # constantly (MD&A, risk factors).  Require high year density (≥10) AND
+        # meaningful dollar/percent density to avoid scanning narrative pages.
+        year_hits = len(re.findall(r"\b20\d{2}\b", page_text))
+        money_hits = len(re.findall(r"\$\s?\d", page_text))
+        percent_hits = page_text.count("%")
+        if year_hits >= 10 and (money_hits + percent_hits) >= 8:
+            return True
+
+        return (money_hits + percent_hits) >= 15
+
+    def _extract_metadata_from_doc(self, doc) -> Dict[str, str]:
+        """Extract PDF metadata from an already-open fitz document."""
         meta: Dict[str, str] = {}
         try:
-            doc = fitz.open(filepath)
             pdf_meta = doc.metadata
             if pdf_meta:
                 for key in ["title", "author", "subject", "creator"]:
                     if pdf_meta.get(key):
                         meta[key] = pdf_meta[key]
             meta["page_count"] = str(len(doc))
-            doc.close()
         except Exception:
             pass
         return meta

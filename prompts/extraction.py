@@ -27,9 +27,12 @@ from typing import Any, Dict, List, Optional, Tuple
 # ===========================================================================
 
 SYSTEM_PROMPT_V1 = """You are an expert private equity analyst. You extract structured
-financial and business data from Confidential Information Memorandums (CIMs).
-You are precise, conservative in estimates, and flag uncertainty.
-You never fabricate data — if information is not in the document, say "not_provided".
+financial and business data from CIMs and financial filings.
+
+You reason like a senior PE associate — you don't just copy what's on the page.
+You derive, infer, and normalise data to give the analyst a complete picture.
+You never fabricate data that cannot be supported by the document.
+
 Return ONLY valid JSON. No markdown, no explanation, no preamble."""
 
 CIM_EXTRACTION_PROMPT_V1 = """Analyze this CIM document and extract structured data.
@@ -46,38 +49,57 @@ Return ONLY a valid JSON object with these exact fields:
         "founding_year": "YYYY or not_provided",
         "headquarters": "City, State/Country",
         "employees": "number or range, e.g. '150' or '100-200'",
+        "employee_count": "integer headcount or not_provided",
         "website": "URL or not_provided"
     }},
     "financials": {{
         "currency": "USD | EUR | GBP | etc",
         "revenue": {{
-            "ltm": "Latest twelve months revenue as number or not_provided",
-            "prior_year": "Prior full year revenue or not_provided",
-            "two_years_ago": "Revenue from 2 years ago or not_provided",
-            "cagr_3yr": "3-year revenue CAGR as decimal (0.15 = 15%) or not_provided"
+            "ltm":             "Latest twelve months revenue as raw integer or not_provided",
+            "ltm_conf":        1.0,
+            "ltm_source":      "verbatim quote or formula, e.g. 'FY2023 revenue: $258.5M' or not_provided",
+            "prior_year":      "Prior full year revenue as raw integer or not_provided",
+            "two_years_ago":   "Revenue from 2 years ago as raw integer or not_provided",
+            "cagr_3yr":        "3-year revenue CAGR as decimal (0.15 = 15%) or not_provided",
+            "cagr_3yr_conf":   1.0,
+            "cagr_3yr_source": "verbatim quote or calculation or not_provided",
+            "history": [
+                {{"period": "e.g. FY2021 or LTM Sep-2024", "value": "raw integer", "yoy_growth": "decimal or not_provided"}}
+            ],
+            "international_pct": "share of revenue from non-domestic markets as decimal or not_provided"
         }},
         "ebitda": {{
-            "ltm": "LTM EBITDA or not_provided",
-            "margin_ltm": "EBITDA margin as decimal or not_provided",
-            "adjusted_ebitda_ltm": "Adjusted EBITDA if provided or not_provided"
+            "ltm":                 "LTM EBITDA as raw integer or not_provided",
+            "ltm_conf":            1.0,
+            "ltm_source":          "verbatim quote or formula or not_provided",
+            "margin_ltm":          "EBITDA margin as decimal or not_provided",
+            "adjusted_ebitda_ltm": "Adjusted EBITDA as raw integer if provided or not_provided",
+            "derived_ebitda":      "EBITDA derived from revenue × margin if not directly stated, else not_provided"
         }},
-        "gross_margin": "as decimal or not_provided",
-        "net_income": "LTM net income or not_provided",
-        "capex": "Annual capex or not_provided",
-        "debt": "Total debt or not_provided",
-        "cash": "Cash and equivalents or not_provided",
-        "recurring_revenue_pct": "% of revenue that is recurring (decimal) or not_provided",
+        "gross_margin":          "as decimal or not_provided",
+        "gross_margin_conf":     1.0,
+        "gross_margin_source":   "verbatim quote or formula or not_provided",
+        "net_income":            "LTM net income as raw integer or not_provided",
+        "net_income_conf":       1.0,
+        "net_income_source":     "verbatim quote or not_provided",
+        "capex":                 "Annual capex as raw integer or not_provided",
+        "free_cash_flow":        "LTM FCF (net income + D&A − capex) as raw integer or not_provided",
+        "free_cash_flow_conf":   1.0,
+        "free_cash_flow_source": "verbatim quote or derivation formula or not_provided",
+        "debt":                  "Total debt as raw integer or not_provided",
+        "cash":                  "Cash and equivalents as raw integer or not_provided",
+        "recurring_revenue_pct": "% of revenue that is recurring as decimal or not_provided",
         "revenue_by_segment": [
-            {{"segment": "name", "revenue": "amount", "pct_of_total": "decimal"}}
+            {{"segment": "name", "revenue": "raw integer", "pct_of_total": "decimal"}}
         ]
     }},
     "customers": {{
         "total_customers": "number or range or not_provided",
-        "top_customer_concentration": "% of revenue from top customer (decimal) or not_provided",
-        "top_10_concentration": "% from top 10 customers (decimal) or not_provided",
+        "top_customer_concentration": "% of revenue from top customer as decimal or not_provided",
+        "top_10_concentration": "% from top 10 customers as decimal or not_provided",
         "customer_retention": "annual retention rate as decimal or not_provided",
         "net_revenue_retention": "NRR as decimal or not_provided",
-        "avg_contract_value": "ACV or not_provided",
+        "avg_contract_value": "ACV as raw integer or not_provided",
         "notable_customers": ["list of named customers mentioned"]
     }},
     "market": {{
@@ -93,7 +115,7 @@ Return ONLY a valid JSON object with these exact fields:
         "key_executives": [
             {{"name": "string", "title": "string", "years_at_company": "number or not_provided"}}
         ],
-        "management_ownership": "% owned by management or not_provided"
+        "management_ownership": "% owned by management as decimal or not_provided"
     }},
     "growth_thesis": {{
         "organic_levers": ["list of organic growth drivers mentioned"],
@@ -116,24 +138,79 @@ Return ONLY a valid JSON object with these exact fields:
         "advisor": "Investment bank or advisor named or not_provided"
     }},
     "extraction_confidence": {{
-        "financial_data": 0.0 to 1.0,
-        "business_description": 0.0 to 1.0,
-        "market_data": 0.0 to 1.0,
-        "overall": 0.0 to 1.0
+        "financial_data": 0.0,
+        "business_description": 0.0,
+        "market_data": 0.0,
+        "overall": 0.0
     }}
 }}
 
-CRITICAL RULES:
-- Use "not_provided" for ANY field where data is not explicitly in the document
-- MONETARY VALUES: Return ALL monetary values as raw USD integers (no $, no commas, no suffixes).
-  If the document states values in thousands, multiply by 1,000.
-  If in millions, multiply by 1,000,000. If in billions, multiply by 1,000,000,000.
-  Examples: "$628 thousand" → 628000 | "$258.5 million" → 258500000 | "$1.2 billion" → 1200000000
-  Never use abbreviations like "k", "m", or "b" in numeric fields.
-- All percentages as decimals (15% = 0.15)
-- Be conservative — do not extrapolate or assume
-- If a range is given, use the midpoint
-- Flag low confidence for any inferred (vs. stated) values
+ANALYST PRINCIPLES:
+
+1. DERIVATION — Never return not_provided for a field that can be computed from numbers
+   explicitly in the document. Priority derivation rules (apply in order):
+   a. LTM period: most recent annual period = LTM for 10-K / annual reports.
+   b. gross_margin: if the income statement shows both Revenue and "Gross profit" lines,
+      compute gross_margin = gross_profit / revenue (set _conf = 0.7, _source = formula).
+   c. ebitda.ltm: if EBITDA is not stated, compute as operating_income + D&A where D&A is
+      visible in the income statement or cash flow statement (set _conf = 0.7).
+   d. ebitda.derived_ebitda: fallback when ebitda.ltm is still absent — use revenue × margin
+      or operating_income + any D&A figure available (set _conf = 0.7).
+   e. cagr_3yr: if revenue.history has ≥3 periods, compute as (latest/earliest)^(1/(n-1)) − 1.
+
+2. NORMALIZATION — Return ALL monetary values as raw integers. Rates, margins, and percentages
+   as decimals (15% = 0.15). Detect the document's unit scale (thousands/millions/billions) and
+   multiply through to raw USD. Never use abbreviations (k, m, b) in numeric fields.
+
+3. COMPLETENESS — Map document terminology to schema fields correctly:
+   "FY revenue" → revenue.ltm | "annual EBITDA" → ebitda.ltm | "net sales" → revenue.ltm
+   "Gross profit" line → compute gross_margin | "Cost of revenue" → cost of goods sold
+   For 10-K and annual reports, the most recent fiscal year figures ARE the LTM figures.
+
+   EBITDA VARIANT MAPPING — all of the following label types map to ebitda.ltm (or
+   ebitda.adjusted_ebitda_ltm when the label says "adjusted/normalized"):
+     "Normalized EBITDA", "Adjusted EBITDA", "Pro Forma EBITDA", "EBITDA (Normalized)",
+     "EBITDA (Adjusted)", "EBITDA (Pro Forma)", "Recurring EBITDA", "Run-Rate EBITDA",
+     "EBITDA — Adjusted", "Adj. EBITDA". When the document presents ONLY a normalized/
+     adjusted figure (no clean stated EBITDA), use it for ebitda.adjusted_ebitda_ltm and
+     also copy the value to ebitda.ltm (set ltm_conf = 0.9, ltm_source = "Normalized EBITDA
+     used as proxy").
+
+   CURRENCY DETECTION — read the document for explicit currency statements (e.g.
+   "All figures in Canadian dollars", "amounts in thousands of GBP", "€ millions") and
+   set financials.currency accordingly (e.g. "CAD", "GBP", "EUR"). Default to "USD" only
+   when no currency is mentioned and the document is clearly US-based.
+
+   REVENUE LTM PROXY — when no historical LTM or most-recent-year revenue is available
+   (e.g. forecast-only CIMs, receivership packages with only projected figures), use the
+   most recent stated figure (trailing average, last reported actual, or nearest forecast
+   year) as a proxy: set revenue.ltm to that value, revenue.ltm_conf = 0.5, and
+   revenue.ltm_source = "No LTM stated; [trailing avg / FY20XX actual / FY20XX forecast]
+   used as proxy."
+
+   Fill every field you can support with document data — use not_provided only as a last resort.
+
+4. INFERENCE — When a value is not stated but can be computed from other extracted figures
+   (e.g. gross_margin = gross_profit / revenue), compute it and set _conf = 0.7.
+   When a value is plausible from context but not directly calculable, set _conf = 0.4.
+   When directly and explicitly stated in the document, set _conf = 1.0.
+
+5. CONFIDENCE SCORING — For every numeric field that has _conf / _source companions, populate them:
+   _conf: 1.0 = explicitly stated | 0.7 = derived from stated figures | 0.4 = inferred from context | 0.0 = absent
+   _source: brief verbatim quote (for 1.0), calculation string (for 0.7), or reasoning (for 0.4)
+   Example: ltm_conf = 0.7, ltm_source = "prior_year $240M × (1 + cagr 0.077) = $258.5M"
+
+6. SCHEMA ADDITIONS — Populate the new fields when the document supports it:
+   revenue.history — year-by-year revenue list (as many periods as the document provides)
+   free_cash_flow — PREFERRED METHOD: Net Cash from Operating Activities (OCF) MINUS
+      Capital Expenditures, both sourced from the cash flow statement. This is the
+      standard PE definition of unlevered FCF. Set conf = 1.0 if both OCF and CapEx
+      are explicitly stated. FALLBACK only if no cash flow statement is available:
+      net_income + D&A − capex. Never guess FCF — leave not_provided if no cash flow
+      statement data is present.
+   ebitda.derived_ebitda — compute as operating_income + D&A (preferred) or revenue × margin
+   employee_count — extract from "X employees" mentions as an integer
+   revenue.international_pct — share of revenue from non-domestic markets
 
 CIM DOCUMENT:
 {document_text}
@@ -147,10 +224,14 @@ CIM DOCUMENT:
 
 SYSTEM_PROMPT_V2 = """You are a senior private equity analyst and financial data specialist.
 You extract structured, machine-readable data from Confidential Information Memorandums (CIMs)
-with surgical precision.
+and SEC filings with surgical precision.
 
 Core principles:
-1. ACCURACY OVER COMPLETENESS — if uncertain, use "not_provided"; never fabricate or extrapolate
+1. EXTRACT EVERYTHING — financial numeric fields (revenue, EBITDA, gross margin, net income,
+   capex, debt) are REQUIRED. Populate every field you can support with document data.
+   Use "not_provided" ONLY as a last resort when data is genuinely absent from the document.
+   Never treat different labeling (FY vs LTM, Annual vs Trailing Twelve Months) as missing data —
+   map them to the correct schema field.
 2. UNIT AWARENESS — always detect the document's stated unit (thousands, millions, billions)
    and normalize all numbers to raw values (1,000,000 = one million)
 3. TIMESTAMP ANCHORING — note the period (LTM, FY2023, H1-2024) wherever relevant
@@ -319,8 +400,31 @@ per-field confidence (1.0 = explicitly stated in document, 0.7 = calculated from
 }}
 
 CRITICAL RULES:
-- "not_provided" for ANY field not explicitly in the document
-- MONETARY VALUES: Return ALL monetary values as raw USD integers (no $, no commas, no suffixes).
+- Use "not_provided" ONLY when data is truly absent from the document. Never use it just
+  because the document label differs from the schema field name. Map terminology correctly:
+  "FY revenue" → revenue.ltm | "annual EBITDA" → ebitda.ltm | "net sales" → revenue.ltm
+  For 10-K and annual reports, the most recent fiscal year figures ARE the LTM figures.
+
+- EBITDA VARIANT MAPPING — all of the following map to ebitda.ltm (or adjusted_ebitda_ltm
+  when the label says "adjusted/normalized"):
+  "Normalized EBITDA", "Adjusted EBITDA", "Pro Forma EBITDA", "EBITDA (Normalized)",
+  "EBITDA (Adjusted)", "EBITDA (Pro Forma)", "Recurring EBITDA", "Run-Rate EBITDA",
+  "Adj. EBITDA". When the document presents ONLY a normalized/adjusted figure, copy the
+  value to both ebitda.adjusted_ebitda_ltm AND ebitda.ltm (ltm_conf = 0.9,
+  ltm_source = "Normalized EBITDA used as proxy").
+
+- CURRENCY DETECTION — read the document for explicit currency statements (e.g. "All
+  figures in Canadian dollars", "amounts in thousands of GBP"). Set financials.currency
+  to the detected code (e.g. "CAD", "GBP", "EUR"). Default "USD" only when the document
+  is clearly US-based and no currency is stated.
+
+- REVENUE LTM PROXY — when no historical LTM or most-recent-year revenue is available
+  (forecast-only CIMs, receivership packages with only projected figures), use the most
+  recent stated figure (trailing average, last reported actual, or nearest forecast year)
+  as proxy: set revenue.ltm to that value, revenue.ltm_conf = 0.5, and revenue.ltm_source
+  = "No LTM stated; [trailing avg / FY20XX actual / FY20XX forecast] used as proxy."
+
+- MONETARY VALUES: Return ALL monetary values as raw integers (no $, no commas, no suffixes).
   Normalise from whatever unit the document uses — multiply through to raw USD.
   Examples: "$628 thousand" → 628000 | "$258.5 million" → 258500000 | "$1.2 billion" → 1200000000
   Never use abbreviations like "k", "m", or "b" in numeric fields.
@@ -333,6 +437,57 @@ CIM DOCUMENT:
 {document_text}
 """
 
+CIM_EXTRACTION_PROMPT_V2_CITATIONS = CIM_EXTRACTION_PROMPT_V2 + """
+
+ADDITIONAL REQUIREMENT: SOURCE CITATIONS
+
+PRIORITY ORDER — citations are ADDITIVE and must never degrade core extraction:
+
+STEP 1 — EXTRACT ALL VALUES FIRST.
+You MUST fill ALL financial fields before adding any citation objects.
+Revenue LTM, EBITDA LTM, gross margin, net income, CAGR, and all other numeric fields
+are REQUIRED and take ABSOLUTE PRIORITY over citation completeness.
+
+STEP 2 — ANNUAL FIGURES ARE LTM.
+For 10-K filings and annual reports, fiscal year figures ARE the LTM figures.
+If the document states "FY2020 revenue: $258.5M", set revenue.ltm = 258500000 and
+revenue.ltm_period = "FY2020". Never return not_provided for revenue or EBITDA when
+annual figures exist in the document.
+
+STEP 3 — ADD CITATIONS AFTER EXTRACTING.
+After all values are filled, add citation objects for the 8 required fields below.
+Citations are SECONDARY — they must NEVER cause a field to be left as not_provided.
+If you extracted a value but cannot find a clean source quote, keep the extracted value
+and set its citation field to "not_provided". A missing citation never justifies a
+missing value.
+
+Citation schema (additive — do not remove or modify existing extracted fields):
+{{
+  "page": int,
+  "section": "string",
+  "snippet": "verbatim text from source (one sentence maximum)"
+}}
+
+Required citation fields (add these alongside existing fields, do not replace them):
+- financials.revenue.ltm_citation
+- financials.ebitda.ltm_citation
+- financials.ebitda.adjusted_ebitda_ltm_citation
+- financials.revenue.cagr_3yr_citation
+- financials.gross_margin_citation
+- financials.ebitda.margin_ltm_citation
+- customers.top_customer_concentration_citation
+- financials.capex_citation
+
+If a cited metric is genuinely not_provided after exhaustive search, set its citation
+field to "not_provided" as well.
+
+Citation rules:
+- Use the closest explicit source in document text or financial table content.
+- Keep snippet verbatim and concise (one sentence, no paraphrasing).
+- Prefer table metadata provided in the prompt (table page + section heading) when available.
+- Do not fabricate snippets — if no verbatim source exists, use "not_provided".
+"""
+
 
 # ===========================================================================
 # Shared prompts (version-independent)
@@ -342,23 +497,44 @@ CIM DOCUMENT:
 SYSTEM_PROMPT          = SYSTEM_PROMPT_V1
 CIM_EXTRACTION_PROMPT  = CIM_EXTRACTION_PROMPT_V1
 
-MEMO_GENERATION_PROMPT = """Based on the following structured CIM data, generate a professional
-investment committee memo.
+MEMO_GENERATION_PROMPT = """Generate a professional investment committee memo from the structured data.
 
-FORMAT:
-1. EXECUTIVE SUMMARY (3-4 sentences: what the company does, why it's interesting, key concern)
-2. COMPANY OVERVIEW (business description, market position, competitive advantages)
-3. FINANCIAL HIGHLIGHTS (key metrics, trends, quality of earnings observations)
-4. GROWTH THESIS (organic + inorganic, with specific evidence from the data)
-5. KEY RISKS & MITIGANTS (top 3-5 risks with honest assessment)
-6. VALUATION CONTEXT (comparable multiples context if available, or market benchmarks)
-7. KEY DILIGENCE QUESTIONS (5-8 critical questions for next phase)
-8. RECOMMENDATION (Pursue / Pass / Need More Info — with clear reasoning)
+Return output in THIS EXACT JSON SHAPE:
+{{
+  "title": "string",
+  "date": "string",
+  "prepared_by": "string",
+  "sections": [
+    {{
+      "heading": "string",
+      "content": "string"
+    }}
+  ]
+}}
 
-TONE: Direct, analytical, no fluff. Write like a senior associate at a top PE firm.
-Be specific with numbers. Flag what's missing.
+Schema rules:
+- Top-level keys MUST be exactly: title, date, prepared_by, sections.
+- sections MUST be an array of objects, each with heading and content as strings.
+- content must be plain text only, using \\n for line breaks and * for bullet points.
+- Do not put nested JSON objects, arrays, or sub-dicts inside content fields.
+- Use concise, analytical PE memo language grounded in the extracted data.
 
-STRUCTURED CIM DATA:
+Standard section set (include the ones supported by available data; omit weak/unsupported sections):
+- Executive Summary
+- Company Overview
+- Financial Highlights
+- Growth Thesis
+- Key Risks & Mitigants
+- Valuation Context
+- Key Diligence Questions
+- Recommendation
+
+CRITICAL OUTPUT INSTRUCTION:
+Return ONLY valid JSON.
+Do not wrap in a "memo" key.
+Do not nest objects inside content fields.
+
+STRUCTURED DATA:
 {extracted_data}
 """
 
@@ -459,6 +635,19 @@ PROMPT_REGISTRY: Dict[str, PromptVersion] = {
             "prior employer, equity plan, board composition, pricing_power, "
             "product_roadmap, MA pipeline size, leverage/integration risk, "
             "data_inconsistencies, asking_ev, process_type, LOI deadline."
+        ),
+    ),
+    "v2_citations": PromptVersion(
+        version="v2_citations",
+        description="V2 extraction with additive citation objects on key financial metrics",
+        system_prompt=SYSTEM_PROMPT_V2,
+        extraction_prompt=CIM_EXTRACTION_PROMPT_V2_CITATIONS,
+        created="2026-03",
+        changelog=(
+            "Adds citation object fields for key financial metrics "
+            "(revenue, EBITDA, adjusted EBITDA, revenue growth, gross margin, "
+            "EBITDA margin, customer concentration, capex) without replacing "
+            "existing V2 fields."
         ),
     ),
 }

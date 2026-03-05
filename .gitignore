@@ -44,3 +44,13 @@ build/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Test document corpora (large PDFs/HTMs — download separately)
+test_docs/
+test_documents/
+
+# Generated test artifacts
+tests/extraction_test_results.json
+
+# Claude local settings (covered by global gitignore too, belt-and-suspenders)
+.claude/

@@ -59,12 +59,14 @@ class MeridianPipeline:
         self,
         filepath: str,
         scoring_profile: str = "balanced",
+        with_citations: bool = False,
     ) -> AnalysisResult:
         """Run the full analysis pipeline on a CIM document.
 
         Args:
             filepath: Path to PDF or DOCX CIM file.
             scoring_profile: "balanced", "conservative", or "growth".
+            with_citations: Enable additive citation fields in extraction output.
 
         Returns:
             AnalysisResult with all outputs.
@@ -85,7 +87,10 @@ class MeridianPipeline:
         # Step 2: Extract structured data
         self._log("Step 2/6: Extracting structured data...")
         t0 = time.time()
-        extracted_data = self.extractor.extract(document)
+        extracted_data = self.extractor.extract(
+            document,
+            with_citations=with_citations,
+        )
         timing["extract"] = time.time() - t0
         company_name = extracted_data.get("company_overview", {}).get(
             "company_name", "Unknown"
@@ -184,7 +189,8 @@ class MeridianPipeline:
     def _parse_document(self, filepath: str) -> ParsedDocument:
         """Route to the correct parser based on file extension."""
         ext = os.path.splitext(filepath)[1].lower()
-        if ext == ".pdf":
+        if ext in (".pdf", ".htm", ".html"):
+            # PyMuPDF handles both PDF and HTML (SEC EDGAR filings) natively
             parser = PDFParser(
                 max_pages=self.config.parser.max_pages,
                 extract_tables=self.config.parser.table_extraction,
@@ -192,7 +198,7 @@ class MeridianPipeline:
         elif ext in (".docx", ".doc"):
             parser = DOCXParser()
         else:
-            raise ValueError(f"Unsupported file type: {ext}. Use PDF or DOCX.")
+            raise ValueError(f"Unsupported file type: {ext}. Use PDF, HTML, or DOCX.")
         return parser.parse(filepath)
 
     def _log(self, msg: str):

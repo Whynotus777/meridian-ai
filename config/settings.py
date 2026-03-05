@@ -35,7 +35,7 @@ class ModelConfig:
     """
     provider: Optional[str] = None   # None → auto-detect
     model: Optional[str] = None      # None → default for provider
-    max_tokens: int = 8192
+    max_tokens: int = 16384
     temperature: float = 0.0         # Deterministic for extraction
     api_key: Optional[str] = None
 
@@ -67,7 +67,7 @@ class ModelConfig:
 @dataclass
 class ParserConfig:
     """Document parsing configuration."""
-    max_pages: int = 150
+    max_pages: int = 300
     max_chars_per_page: int = 5000
     table_extraction: bool = True
     ocr_enabled: bool = False  # Phase 2: enable for scanned PDFs

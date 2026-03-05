@@ -32,9 +32,14 @@ def cmd_analyze(args):
     print(f"{'='*60}")
     print(f"  File: {args.file}")
     print(f"  Profile: {args.profile}")
+    print(f"  Citations: {'enabled' if args.with_citations else 'disabled'}")
     print(f"{'='*60}\n")
 
-    result = pipeline.analyze(args.file, scoring_profile=args.profile)
+    result = pipeline.analyze(
+        args.file,
+        scoring_profile=args.profile,
+        with_citations=args.with_citations,
+    )
 
     # Print summary
     co = result.extracted_data.get("company_overview", {})
@@ -144,7 +149,7 @@ def cmd_parse(args):
     from parsers.docx_parser import DOCXParser
 
     ext = os.path.splitext(args.file)[1].lower()
-    if ext == ".pdf":
+    if ext in (".pdf", ".htm", ".html"):
         parser = PDFParser()
     elif ext in (".docx", ".doc"):
         parser = DOCXParser()
@@ -173,7 +178,7 @@ def cmd_batch(args):
     import time
 
     # Discover CIM files
-    patterns = ["*.pdf", "*.docx", "*.doc"]
+    patterns = ["*.pdf", "*.htm", "*.html", "*.docx", "*.doc"]
     cim_files = []
     for pat in patterns:
         cim_files.extend(glob.glob(os.path.join(args.directory, pat)))
@@ -363,6 +368,11 @@ def main():
         default="balanced",
         choices=["balanced", "conservative", "growth"],
         help="Scoring weight profile",
+    )
+    p_analyze.add_argument(
+        "--with-citations",
+        action="store_true",
+        help="Enable additive source citation fields in extraction output (v2_citations).",
     )
     p_analyze.add_argument("--output", help="Output JSON path")
 

@@ -1,6 +1,6 @@
 """Meridian AI — Streamlit web application.
 
-Upload a CIM → progress tracking → tabbed analysis display:
+Upload a document → progress tracking → tabbed analysis display:
   Memo | Financials | Risks | Comps | Score | Q&A
 
 Run with:
@@ -28,6 +28,10 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+try:
+    st.set_option("server.runOnSave", False)
+except Exception:
+    pass
 
 # ---------------------------------------------------------------------------
 # CSS
@@ -35,6 +39,14 @@ st.set_page_config(
 st.markdown(
     """
 <style>
+    .main .block-container {
+        padding-top: 1.25rem;
+        padding-left: 2rem;
+        padding-right: 2rem;
+        padding-bottom: 2rem;
+        max-width: 1400px;
+    }
+
     /* ── Brand tokens ──────────────────────────────────────────────────── */
     :root {
         --accent:     #E07A5F;
@@ -63,6 +75,7 @@ st.markdown(
         border: 1px solid var(--border);
         border-radius: 8px;
         padding: 0.75rem 1rem;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.22);
     }
 
     /* ── Severity badges ───────────────────────────────────────────────── */
@@ -89,6 +102,32 @@ st.markdown(
         line-height: 1;
     }
     .meridian-logo span { color: var(--accent); }
+    .meridian-home-link {
+        display: block;
+        text-decoration: none !important;
+        background: transparent !important;
+        border: 0 !important;
+        cursor: pointer;
+        padding: 0;
+        margin: 0;
+    }
+    .meridian-home-link:hover,
+    .meridian-home-link:focus,
+    .meridian-home-link:active {
+        text-decoration: none !important;
+        outline: none !important;
+        box-shadow: none !important;
+        background: transparent !important;
+    }
+    .meridian-home-logo {
+        font-size: 1.65rem;
+        font-weight: 800;
+        letter-spacing: -0.5px;
+        padding: 0.3rem 0 0.15rem 0;
+        line-height: 1;
+    }
+    .meridian-home-meridian { color: var(--accent); }
+    .meridian-home-ai { color: #e8e8e8; }
 
     /* ── Tagline under logo ────────────────────────────────────────────── */
     .meridian-tagline {
@@ -115,7 +154,7 @@ st.markdown(
         color: var(--blue-muted);
         font-size: 1rem;
         font-weight: 700;
-        margin-top: 1.5rem;
+        margin-top: 2rem;
         margin-bottom: 0.3rem;
         padding-bottom: 0.25rem;
         border-bottom: 1px solid var(--border);
@@ -160,6 +199,82 @@ st.markdown(
         font-size: 0.82rem;
         margin-top: 0;
         margin-bottom: 0.8rem;
+    }
+
+    .wire-card {
+        border: 1px solid #2d2d50;
+        border-radius: 10px;
+        background: rgba(16, 17, 31, 0.78);
+        padding: 0.75rem 0.85rem;
+        transition: border-color 0.15s ease, transform 0.15s ease;
+    }
+    .wire-card:hover {
+        border-color: #4b5f9c;
+        transform: translateY(-1px);
+    }
+    .wire-title {
+        color: #d8defa;
+        font-size: 0.82rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 0.5rem;
+        font-weight: 700;
+    }
+    .wire-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 0.7rem;
+        color: #98a0cd;
+        border-top: 1px solid #272847;
+        padding: 0.45rem 0;
+        font-size: 0.86rem;
+    }
+    .wire-row:first-child { border-top: 0; padding-top: 0.1rem; }
+    .health-dot {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        margin-right: 6px;
+    }
+    .btn-ghost {
+        border: 1px solid #3a3a63;
+        color: #d3d7f8;
+        background: #1a1b30;
+        border-radius: 8px;
+        padding: 0.38rem 0.72rem;
+        font-size: 0.8rem;
+        font-weight: 700;
+        display: inline-block;
+        margin-right: 0.45rem;
+    }
+
+    .hero-metric-card {
+        background: linear-gradient(180deg, #1b1b31, #18182b);
+        border: 1px solid #2c3357;
+        border-radius: 10px;
+        padding: 0.7rem 0.85rem;
+    }
+    .hero-metric-label {
+        color: #8d94c5;
+        font-size: 0.72rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        margin-bottom: 0.25rem;
+    }
+    .hero-metric-value {
+        color: #edf0ff;
+        font-size: 1.2rem;
+        font-weight: 700;
+        line-height: 1.15;
+    }
+
+    .memo-content ul {
+        margin-left: 1.25rem;
+        padding-left: 0.9rem;
+    }
+    .memo-content li {
+        margin-bottom: 0.3rem;
     }
 </style>
 """,
@@ -293,6 +408,12 @@ if "fund_matches" not in st.session_state:
     st.session_state.fund_matches = None
 if "_exports_for" not in st.session_state:
     st.session_state["_exports_for"] = None
+if "_preview_panel" not in st.session_state:
+    st.session_state["_preview_panel"] = None
+if "analyzed_deals" not in st.session_state:
+    st.session_state["analyzed_deals"] = []
+if "_pipeline_inline_upload" not in st.session_state:
+    st.session_state["_pipeline_inline_upload"] = False
 
 # Configure panel state
 if "_scoring_profile" not in st.session_state:
@@ -305,6 +426,21 @@ for _dim, _, _, _ in _SLIDER_DIMS:
 for _sec_key, _ in _MEMO_SECTION_LABELS:
     if f"_msec_{_sec_key}" not in st.session_state:
         st.session_state[f"_msec_{_sec_key}"] = True
+
+# Home navigation via clickable sidebar logo
+_home_qp = str(st.query_params.get("home", "")).lower()
+if _home_qp in ("1", "true", "yes"):
+    st.session_state.result = None
+    st.session_state.document = None
+    st.session_state.messages = []
+    st.session_state.fund_matches = None
+    st.session_state["_preview_panel"] = None
+    st.session_state["_pipeline_inline_upload"] = False
+    try:
+        st.query_params.clear()
+    except Exception:
+        pass
+    st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +504,13 @@ def _fmt_pct(val) -> str:
         return str(val)
 
 
+def _fmt_str(val) -> str:
+    """Return a display-safe string, converting sentinel 'not_provided' to 'N/A'."""
+    if val is None or str(val).lower() in ("not_provided", "none", ""):
+        return "N/A"
+    return str(val)
+
+
 def _score_colour(score: float) -> str:
     if score >= 0.75:
         return "#4caf50"
@@ -390,109 +533,431 @@ def _escape_dollars(text: str) -> str:
     return text.replace("$", "\\$") if isinstance(text, str) else text
 
 
-def _render_memo(memo_text: str):
-    """Render the investment memo from a JSON string or plain markdown.
+def _extract_page_from_citation(citation_obj):
+    """Extract a page number from citation/page-reference payloads."""
+    if not isinstance(citation_obj, dict):
+        return None
+    page = citation_obj.get("page")
+    if isinstance(page, int) and page > 0:
+        return page
+    if isinstance(page, str) and page.strip().isdigit():
+        return int(page.strip())
+    page_ref = citation_obj.get("page_reference")
+    if isinstance(page_ref, int) and page_ref > 0:
+        return page_ref
+    if isinstance(page_ref, str):
+        m = re.search(r"\d+", page_ref)
+        if m:
+            return int(m.group(0))
+    return None
 
-    Supports two JSON shapes:
-      Format A — {"investment_committee_memo": {"executive_summary": ..., ...}}
-      Format B — {"memo": {"sections": [{"heading": ..., "content": ...}, ...]}}
 
-    All content is dollar-escaped before passing to st.markdown() to prevent
-    Streamlit from mis-interpreting financial figures as LaTeX.
-    """
-    import json as _json
+def _metric_with_page(value, citation_obj) -> str:
+    """Render metric value with optional citation page suffix."""
+    # Sanitise sentinel values so raw "not_provided" never reaches the UI
+    if value is None or str(value).lower() in ("not_provided", "none", ""):
+        value = "N/A"
+    page = _extract_page_from_citation(citation_obj)
+    if page:
+        return f"**{value}** <span style='color:#8888aa;font-size:0.82rem'>(p. {page})</span>"
+    return f"**{value}**"
 
-    # Keyed sections for Format A
-    _SECTIONS = [
-        ("executive_summary",       "Executive Summary"),
-        ("company_overview",        "Company Overview"),
-        ("financial_highlights",    "Financial Highlights"),
-        ("growth_thesis",           "Growth Thesis"),
-        ("key_risks_and_mitigants", "Key Risks & Mitigants"),
-        ("valuation_context",       "Valuation Context"),
-        ("key_diligence_questions", "Key Diligence Questions"),
-        ("recommendation",          "Recommendation"),
+
+def _health_dot(status: str) -> str:
+    return {
+        "green": "🟢",
+        "yellow": "🟡",
+        "red": "🔴",
+    }.get(status, "⚪")
+
+
+def _pipeline_deals():
+    deals = [
+        {"company": "NovaTech Solutions", "industry": "Enterprise Software", "revenue": 142_000_000, "grade": "B+", "days": 12, "stage": "Screening"},
+        {"company": "Apex Learning Co", "industry": "EdTech", "revenue": 89_000_000, "grade": "A-", "days": 3, "stage": "Initial Review"},
+        {"company": "CloudBridge SaaS", "industry": "Cloud Infrastructure", "revenue": 221_000_000, "grade": "B", "days": 8, "stage": "Deep Diligence"},
+        {"company": "Summit Cyber", "industry": "Cybersecurity", "revenue": 178_000_000, "grade": "A", "days": 5, "stage": "IC Ready"},
+        {"company": "MedTech Solutions", "industry": "Healthcare IT", "revenue": 97_000_000, "grade": "B-", "days": 16, "stage": "Deep Diligence"},
+        {"company": "DataFlow Analytics", "industry": "Data/AI", "revenue": 64_000_000, "grade": "C+", "days": 19, "stage": "Passed"},
+        {"company": "Harbor Logistics Tech", "industry": "Supply Chain SaaS", "revenue": 133_000_000, "grade": "B", "days": 6, "stage": "Initial Review"},
+        {"company": "Veridian Payments", "industry": "FinTech", "revenue": 204_000_000, "grade": "B+", "days": 11, "stage": "Screening"},
     ]
+    for item in st.session_state.get("analyzed_deals", []):
+        if not any(d["company"] == item["company"] for d in deals):
+            deals.append(item)
+    return deals
 
-    data = None
-    try:
-        data = _json.loads(memo_text)
-    except (_json.JSONDecodeError, TypeError):
-        pass
 
-    if data is None:
-        # Plain markdown — render the whole memo as one block.
-        # Splitting by section would mangle numbered lists (diligence questions etc.).
-        st.markdown(_escape_dollars(memo_text))
-        return
+def _render_pipeline_dashboard(show_title: bool = True):
+    deals = _pipeline_deals()
+    active = [d for d in deals if d["stage"] != "Passed"]
+    avg_days = round(sum(d["days"] for d in deals) / max(1, len(deals)), 1)
 
-    # ── Format A: investment_committee_memo keyed structure ───────────────
-    icm = data.get("investment_committee_memo")
-    if isinstance(icm, dict):
-        rendered_any = False
-        for key, title in _SECTIONS:
-            if not st.session_state.get(f"_msec_{key}", True):
-                continue
-            val = icm.get(key)
-            if not val:
-                continue
-            rendered_any = True
+    left, btn_upload_col, btn_compare_col = st.columns([6, 1.4, 1.4])
+    with left:
+        if show_title:
             st.markdown(
-                f"<div class='memo-section-header'>{title}</div>",
+                "<h2 style='color:#e8e8e8;margin-bottom:0.2rem'>Deal Pipeline Dashboard</h2>",
                 unsafe_allow_html=True,
             )
-            if isinstance(val, list):
-                for item in val:
-                    if isinstance(item, dict):
-                        risk  = _escape_dollars(item.get("risk",     item.get("title", "")))
-                        mitig = _escape_dollars(item.get("mitigant", item.get("mitigation", "")))
-                        if mitig:
-                            st.markdown(f"- **{risk}** — {mitig}")
-                        else:
-                            st.markdown(f"- {risk or _escape_dollars(str(item))}")
-                    else:
-                        st.markdown(f"- {_escape_dollars(str(item))}")
-            else:
-                st.markdown(_escape_dollars(str(val)))
-        if rendered_any:
-            return
+        st.caption("Track live opportunities from screening through IC decisions.")
+    with btn_upload_col:
+        if st.button("Upload", width="stretch"):
+            st.session_state["_pipeline_inline_upload"] = True
+    with btn_compare_col:
+        if st.button("Compare", width="stretch"):
+            st.session_state["_preview_panel"] = "compare"
+            st.rerun()
 
-    # ── Format B: memo.sections array structure ───────────────────────────
-    memo_obj = data.get("memo", data)
-    sections = memo_obj.get("sections") if isinstance(memo_obj, dict) else None
-    _heading_to_key = {lbl.lower(): k for k, lbl in _MEMO_SECTION_LABELS}
-    if isinstance(sections, list) and sections:
+    if st.session_state.get("_pipeline_inline_upload"):
+        with st.container(border=True):
+            inline_file = st.file_uploader(
+                "Upload a PDF or DOCX",
+                type=["pdf", "docx", "doc"],
+                key="_pipeline_inline_uploader",
+                help="Max 200MB",
+                width="stretch",
+            )
+            a_col, c_col = st.columns([1, 1])
+            with a_col:
+                inline_analyze = st.button(
+                    "Analyze Upload",
+                    type="primary",
+                    width="stretch",
+                    disabled=(inline_file is None),
+                    key="_pipeline_inline_analyze_btn",
+                )
+            with c_col:
+                if st.button("Cancel", width="stretch", key="_pipeline_inline_cancel_btn"):
+                    st.session_state["_pipeline_inline_upload"] = False
+                    st.rerun()
+        if inline_analyze and inline_file is not None:
+            if getattr(inline_file, "size", 0) and inline_file.size > 200 * 1024 * 1024:
+                st.error("File exceeds 200MB limit.")
+            else:
+                _execute_analysis_workflow(inline_file, st.session_state.get("_scoring_profile", "balanced"))
+                return
+
+    m1, m2, m3 = st.columns(3, gap="small")
+    metric_cards = [
+        ("Total Active Deals", f"{len(active)}"),
+        ("Average Days to IC", f"{avg_days}d"),
+        ("Deals Reviewed This Month", "14"),
+    ]
+    for col, (label, value) in zip((m1, m2, m3), metric_cards):
+        col.markdown(
+            "<div class='hero-metric-card'>"
+            f"<div class='hero-metric-label'>{label}</div>"
+            f"<div class='hero-metric-value'>{value}</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    st.divider()
+
+    stages = ["Screening", "Initial Review", "Deep Diligence", "IC Ready", "Passed"]
+    cols = st.columns(len(stages))
+    for col, stage in zip(cols, stages):
+        stage_deals = [d for d in deals if d["stage"] == stage]
+        with col:
+            st.markdown(
+                f"<div class='wire-title' style='margin-bottom:0.4rem'>{stage} ({len(stage_deals)})</div>",
+                unsafe_allow_html=True,
+            )
+            for d in stage_deals:
+                st.markdown(
+                    "<div class='wire-card' style='margin-bottom:0.55rem'>"
+                    f"<div style='color:#e8e8f8;font-weight:700;font-size:0.9rem'>{d['company']}</div>"
+                    f"<div style='color:#8e97c8;font-size:0.76rem;margin-top:0.2rem'>{d['industry']}</div>"
+                    "<div style='display:flex;justify-content:space-between;margin-top:0.45rem;"
+                    "font-size:0.82rem;color:#cfd4f5'>"
+                    f"<span>{_fmt_num(d['revenue'])}</span><span style='color:#7fd19a'>{d['grade']}</span>"
+                    "</div>"
+                    f"<div style='color:#7b83b6;font-size:0.74rem;margin-top:0.28rem'>{d['days']} {'day' if d['days'] == 1 else 'days'} in stage</div>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+
+def _render_data_room_tab():
+    import pandas as pd
+
+    st.markdown("<div class='section-label'>Deal Data Room</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='info-card'><h4>1 of 5 documents analyzed</h4>"
+        "<p>Keep feeding diligence artifacts to enrich risk, comp, and memo quality.</p></div>",
+        unsafe_allow_html=True,
+    )
+
+    docs = [
+        {"Document": "Confidential Information Memorandum", "Type": "CIM", "Pages": 108, "Date": "2026-03-04", "Status": "🟢 Analyzed"},
+        {"Document": "Quality of Earnings Report", "Type": "QofE", "Pages": 74, "Date": "2026-03-02", "Status": "🟡 Pending"},
+        {"Document": "Management Presentation", "Type": "CIM", "Pages": 41, "Date": "2026-02-28", "Status": "🟡 Pending"},
+        {"Document": "Customer Contracts Summary", "Type": "Legal", "Pages": 23, "Date": "2026-02-25", "Status": "⚪ Not Started"},
+        {"Document": "Financial Model", "Type": "Financial", "Pages": 18, "Date": "2026-02-24", "Status": "⚪ Not Started"},
+    ]
+    st.dataframe(pd.DataFrame(docs), width="stretch", hide_index=True)
+
+    st.markdown("---")
+    st.markdown("<div class='section-label'>Add Documents</div>", unsafe_allow_html=True)
+    st.file_uploader(
+        "Upload VDR export or drag documents",
+        type=["pdf", "docx", "xlsx", "csv"],
+        accept_multiple_files=True,
+        key="_deal_data_room_upload",
+        label_visibility="collapsed",
+    )
+    st.button("Queue Documents", width="stretch", disabled=True)
+
+
+def _render_portfolio_view(show_title: bool = True):
+    import altair as alt
+    import pandas as pd
+
+    if show_title:
+        st.markdown("<h2 style='color:#e8e8e8;margin-bottom:0.2rem'>Portfolio Intelligence</h2>", unsafe_allow_html=True)
+    st.caption("Operating view across active portfolio companies.")
+    top_l, top_r = st.columns([5, 1])
+    with top_r:
+        st.button("Export All", width="stretch")
+
+    records = [
+        {"Company": "Apex Learning Co", "Sector": "EdTech", "Revenue": "$142M", "EBITDA Margin": "18%", "YoY Growth": "+14.2%", "Health": _health_dot("green"), "Last Updated": "Feb 2026"},
+        {"Company": "CloudBridge SaaS", "Sector": "Cloud Infrastructure", "Revenue": "$221M", "EBITDA Margin": "22%", "YoY Growth": "+28.6%", "Health": _health_dot("green"), "Last Updated": "Jan 2026"},
+        {"Company": "MedTech Solutions", "Sector": "Healthcare IT", "Revenue": "$97M", "EBITDA Margin": "12%", "YoY Growth": "+6.9%", "Health": _health_dot("yellow"), "Last Updated": "Mar 2026"},
+        {"Company": "DataFlow Analytics", "Sector": "Data/AI", "Revenue": "$64M", "EBITDA Margin": "-3%", "YoY Growth": "-3.1%", "Health": _health_dot("red"), "Last Updated": "Feb 2026"},
+        {"Company": "SecureNet Cyber", "Sector": "Cybersecurity", "Revenue": "$178M", "EBITDA Margin": "25%", "YoY Growth": "+19.4%", "Health": _health_dot("green"), "Last Updated": "Mar 2026"},
+    ]
+    df = pd.DataFrame(records)
+
+    selected_company = None
+    try:
+        event = st.dataframe(
+            df,
+            width="stretch",
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="portfolio_table",
+        )
+        rows = (event.selection.rows if event and getattr(event, "selection", None) else [])
+        if rows:
+            selected_company = df.iloc[rows[0]]["Company"]
+    except TypeError:
+        st.dataframe(df, width="stretch", hide_index=True)
+
+    fallback = st.selectbox(
+        "Select Company",
+        options=[r["Company"] for r in records],
+        index=0,
+        key="_portfolio_company_select",
+    )
+    selected_company = selected_company or fallback
+
+    if selected_company:
+        st.divider()
+        st.markdown(f"### {selected_company}")
+        trend = {
+            "Apex Learning Co": [102, 111, 118, 126, 134, 142],
+            "CloudBridge SaaS": [131, 147, 166, 183, 205, 221],
+            "MedTech Solutions": [81, 85, 88, 90, 94, 97],
+            "DataFlow Analytics": [72, 70, 69, 67, 65, 64],
+            "SecureNet Cyber": [121, 132, 144, 156, 168, 178],
+        }[selected_company]
+        years = ["FY2021", "FY2022", "FY2023", "FY2024", "FY2025", "FY2026"]
+        trend_df = pd.DataFrame({"Fiscal Year": years, "Revenue ($M)": trend})
+        y_min = min(trend) * 0.92
+        y_max = max(trend) * 1.08
+        with st.container(border=True):
+            chart = (
+                alt.Chart(trend_df)
+                .mark_line(point=True, strokeWidth=3, color="#7fb8ff")
+                .encode(
+                    x=alt.X("Fiscal Year:N", sort=years, title="Fiscal Year"),
+                    y=alt.Y("Revenue ($M):Q", scale=alt.Scale(domain=[y_min, y_max]), title="Revenue ($M)"),
+                    tooltip=["Fiscal Year", "Revenue ($M)"],
+                )
+                .properties(height=300)
+            )
+            st.altair_chart(chart, width="stretch")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("LTM Revenue", f"${trend[-1]}M")
+            c2.metric("6-Month Delta", f"{trend[-1] - trend[-2]:+,.0f}M")
+            c3.metric("Trend", "Improving" if trend[-1] >= trend[-2] else "Under Review")
+            st.button("Generate LP Report", type="primary")
+
+
+def _render_compare_view():
+    deals = _pipeline_deals()
+    options = [d["company"] for d in deals]
+    left_sel, right_sel = st.columns(2)
+    company_a = left_sel.selectbox("Company A", options=options, index=0, key="_cmp_a")
+    company_b = right_sel.selectbox("Company B", options=options, index=min(1, len(options) - 1), key="_cmp_b")
+
+    a = next(d for d in deals if d["company"] == company_a)
+    b = next(d for d in deals if d["company"] == company_b)
+    metrics = [
+        ("Revenue", a["revenue"], b["revenue"], "num"),
+        ("EBITDA", a["revenue"] * 0.18, b["revenue"] * 0.22, "num"),
+        ("EBITDA Margin", 0.18, 0.22, "pct"),
+        ("Growth (3yr CAGR)", 0.121, 0.224, "pct"),
+        ("Deal Score", 0.79 if "A" in a["grade"] else 0.68, 0.84 if "A" in b["grade"] else 0.70, "pct"),
+        ("Recurring Revenue %", 0.74, 0.88, "pct"),
+        ("Customer Concentration", 0.34, 0.22, "pct_low_wins"),
+    ]
+
+    st.divider()
+    h1, h2 = st.columns(2)
+    h1.markdown(f"### {company_a}")
+    h2.markdown(f"### {company_b}")
+
+    for label, av, bv, kind in metrics:
+        c1, c2, c3 = st.columns([2, 2, 2])
+        if kind == "num":
+            a_txt, b_txt = _fmt_num(av), _fmt_num(bv)
+            awin = av >= bv
+            bwin = bv > av
+        elif kind == "pct_low_wins":
+            a_txt, b_txt = _fmt_pct(av), _fmt_pct(bv)
+            awin = av <= bv
+            bwin = bv < av
+        else:
+            a_txt, b_txt = _fmt_pct(av), _fmt_pct(bv)
+            awin = av >= bv
+            bwin = bv > av
+        c1.write(label)
+        c2.markdown(f"<span style='color:{'#65d38b' if awin else '#d3d7f8'};font-weight:700'>{a_txt}</span>", unsafe_allow_html=True)
+        c3.markdown(f"<span style='color:{'#65d38b' if bwin else '#d3d7f8'};font-weight:700'>{b_txt}</span>", unsafe_allow_html=True)
+
+    st.divider()
+    winner = company_a if a["revenue"] >= b["revenue"] else company_b
+    st.markdown(
+        "<div style='background:#1a1f2e;border:1px solid #2b3657;border-radius:8px;"
+        "padding:0.75rem 0.9rem;color:#c8d0ef'>"
+        f"AI summary: {winner} presents the stronger blend of growth quality and scale, "
+        "while the other opportunity offers a narrower upside profile with higher diligence sensitivity."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_memo(memo_text):
+    """Render memo with canonical sections schema plus resilient fallbacks."""
+    import json as _json
+
+    section_order = [
+        "executive_summary",
+        "company_overview",
+        "financial_highlights",
+        "growth_thesis",
+        "key_risks_and_mitigants",
+        "valuation_context",
+        "key_diligence_questions",
+        "recommendation",
+    ]
+    label_overrides = {
+        "key_risks_and_mitigants": "Key Risks & Mitigants",
+        "key_diligence_questions": "Key Diligence Questions",
+    }
+
+    def _to_title(key: str) -> str:
+        k = str(key).strip().lower()
+        if k in label_overrides:
+            return label_overrides[k]
+        return str(key).replace("_", " ").title()
+
+    def _render_content(val):
+        if val is None:
+            return
+        if isinstance(val, str):
+            if val.strip():
+                st.markdown(_escape_dollars(val))
+            return
+        if isinstance(val, list):
+            for item in val:
+                if isinstance(item, dict):
+                    bits = []
+                    for k, v in item.items():
+                        if v in (None, "", "not_provided"):
+                            continue
+                        bits.append(f"{_to_title(k)}: {v}")
+                    if bits:
+                        st.markdown(f"* {_escape_dollars(' | '.join(bits))}")
+                else:
+                    st.markdown(f"* {_escape_dollars(str(item))}")
+            return
+        if isinstance(val, dict):
+            for k, v in val.items():
+                if v in (None, "", "not_provided"):
+                    continue
+                if isinstance(v, (dict, list)):
+                    st.markdown(f"**{_escape_dollars(_to_title(k))}:**")
+                    _render_content(v)
+                else:
+                    st.markdown(f"* **{_escape_dollars(_to_title(k))}:** {_escape_dollars(str(v))}")
+            return
+        st.markdown(_escape_dollars(str(val)))
+
+    data = memo_text if isinstance(memo_text, dict) else None
+    if data is None:
+        try:
+            data = _json.loads(memo_text)
+        except (_json.JSONDecodeError, TypeError):
+            data = None
+
+    # Fallback path 2: plain string
+    if data is None:
+        st.markdown(_escape_dollars(str(memo_text)))
+        return
+
+    # Primary path: canonical schema with top-level sections array
+    sections = data.get("sections") if isinstance(data, dict) else None
+    if isinstance(sections, list):
+        title = str(data.get("title", "")).strip()
+        date_str = str(data.get("date", "")).strip()
+        prepared_by = str(data.get("prepared_by", "")).strip()
+        if title:
+            st.markdown(f"### {_escape_dollars(title)}")
+        meta = [x for x in [date_str, f"Prepared by: {prepared_by}" if prepared_by else ""] if x]
+        if meta:
+            st.caption("  ·  ".join(meta))
+
+        rendered = False
         for sec in sections:
             if not isinstance(sec, dict):
                 continue
-            heading = sec.get("heading") or sec.get("title") or ""
-            content = sec.get("content") or sec.get("body") or ""
-            _sec_key = _heading_to_key.get(heading.strip().lower())
-            if _sec_key and not st.session_state.get(f"_msec_{_sec_key}", True):
+            heading = str(sec.get("heading", "")).strip()
+            content = sec.get("content", "")
+            if not heading and content in (None, "", "not_provided"):
                 continue
-            if heading:
-                st.markdown(
-                    f"<div class='memo-section-header'>"
-                    f"{_escape_dollars(heading)}</div>",
-                    unsafe_allow_html=True,
-                )
-            if isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict):
-                        risk  = _escape_dollars(item.get("risk",     item.get("title", "")))
-                        mitig = _escape_dollars(item.get("mitigant", item.get("mitigation", "")))
-                        if mitig:
-                            st.markdown(f"- **{risk}** — {mitig}")
-                        else:
-                            st.markdown(f"- {risk or _escape_dollars(str(item))}")
-                    else:
-                        st.markdown(f"- {_escape_dollars(str(item))}")
-            elif isinstance(content, str) and content.strip():
-                st.markdown(_escape_dollars(content))
+            rendered = True
+            st.markdown(f"### {_escape_dollars(heading or 'Section')}")
+            _render_content(content)
+        if rendered:
+            return
+
+    # Fallback path 1: keyed sections at top-level (or common legacy wrapper)
+    keyed = {}
+    if isinstance(data, dict):
+        for k, v in data.items():
+            lk = str(k).lower()
+            if lk in section_order:
+                keyed[lk] = v
+        if not keyed and isinstance(data.get("investment_committee_memo"), dict):
+            for k, v in data["investment_committee_memo"].items():
+                keyed[str(k).lower()] = v
+
+    if keyed:
+        ordered_keys = [k for k in section_order if k in keyed] + [k for k in keyed.keys() if k not in section_order]
+        for k in ordered_keys:
+            v = keyed.get(k)
+            if v in (None, "", "not_provided"):
+                continue
+            st.markdown(f"### {_escape_dollars(_to_title(k))}")
+            _render_content(v)
         return
 
-    # ── Fallback: unknown JSON shape, render raw ──────────────────────────
-    st.markdown(_escape_dollars(memo_text))
+    # Last resort: render JSON as markdown-ish text
+    _render_content(data)
 
 
 def _extract_memo_risks(memo_text: str) -> list:
@@ -519,6 +984,92 @@ def _extract_memo_risks(memo_text: str) -> list:
     if not memo_text:
         return []
 
+    _stop_markers = (
+        "VALUATION CONTEXT",
+        "KEY DILIGENCE QUESTIONS",
+        "DILIGENCE QUESTIONS",
+        "RECOMMENDATION",
+    )
+
+    def _truncate_at_stop_markers(text: str) -> str:
+        if not isinstance(text, str):
+            return text
+        upper = text.upper()
+        cut = None
+        for marker in _stop_markers:
+            idx = upper.find(marker)
+            if idx != -1 and (cut is None or idx < cut):
+                cut = idx
+        return text[:cut].strip() if cut is not None else text.strip()
+
+    # Generic intro-sentence phrases that parsers sometimes mis-identify as
+    # risk titles.  Any parsed risk whose title matches these patterns or is
+    # implausibly long (> 80 chars) is discarded.
+    _intro_pat = re.compile(
+        r'\b(key risks?|include|following|associated with|related to|'
+        r'factors? that|may impact|could impact|potential risks?|risks? include)\b',
+        re.IGNORECASE,
+    )
+
+    def _is_intro_sentence(title: str) -> bool:
+        """Return True if this 'risk title' looks like a preamble sentence."""
+        t = title.strip()
+        return len(t) > 80 or bool(_intro_pat.search(t))
+
+    def _sanitize_risk_entry(entry: dict) -> dict:
+        risk_txt = _truncate_at_stop_markers(
+            str(entry.get("risk") or entry.get("title") or "").strip()
+        )
+        mitigant_txt = _truncate_at_stop_markers(
+            str(entry.get("mitigant") or entry.get("mitigation") or "").strip()
+        )
+        out = {}
+        if risk_txt and not _is_intro_sentence(risk_txt):
+            out["risk"] = risk_txt
+        if mitigant_txt:
+            out["mitigant"] = mitigant_txt
+        if entry.get("description"):
+            out["description"] = _truncate_at_stop_markers(str(entry.get("description")).strip())
+        return out
+
+    def _parse_risk_content_block(text: str) -> list:
+        """Parse canonical section content into risk dicts."""
+        if not isinstance(text, str) or not text.strip():
+            return []
+        content = _truncate_at_stop_markers(text.strip())
+        split_pat = r'(?m)(?=^\s*(?:\d+[\.\)]\s+|[A-Z][A-Za-z0-9&/,\-\s]{2,}:\s))'
+        blocks = [b.strip() for b in re.split(split_pat, content) if b and b.strip()]
+        if len(blocks) == 1 and "\n" in content:
+            # Fallback split by line when regex doesn't segment well
+            blocks = [b.strip() for b in content.splitlines() if b.strip()]
+
+        parsed = []
+        for block in blocks:
+            line = re.sub(r'^\s*\d+[\.\)]\s*', '', block).strip()
+            if not line:
+                continue
+            if ":" in line:
+                title, desc = line.split(":", 1)
+            else:
+                title, desc = line, ""
+            title = title.strip()
+            desc = desc.strip()
+
+            mitigant = ""
+            mit_match = re.search(r'(?i)\b(?:mitigated by|mitigant)\s*:?\s*', desc)
+            if mit_match:
+                mitigant = desc[mit_match.end():].strip(" .;:-")
+                desc = desc[:mit_match.start()].strip(" .;:-")
+
+            safe = _sanitize_risk_entry({
+                "risk": title,
+                "description": desc,
+                "mitigant": mitigant,
+            })
+            if safe.get("risk"):
+                parsed.append(safe)
+        return parsed
+
     # ── Attempts 1 & 2 require valid JSON ────────────────────────────────
     data = None
     try:
@@ -527,18 +1078,60 @@ def _extract_memo_risks(memo_text: str) -> list:
         pass
 
     if data is not None:
+        # ── Canonical format: top-level sections[{heading, content}] ──────
+        sections = data.get("sections")
+        if isinstance(sections, list):
+            for sec in sections:
+                if not isinstance(sec, dict):
+                    continue
+                heading = str(sec.get("heading") or sec.get("title") or "").strip()
+                if "risk" not in heading.lower():
+                    continue
+                content = sec.get("content") or ""
+                if isinstance(content, str):
+                    parsed = _parse_risk_content_block(content)
+                    print(f"[risks debug] found {len(parsed)} risks from memo")
+                    if parsed:
+                        return parsed
+
         # ── Attempt 1: investment_committee_memo.key_risks_and_mitigants ──
         icm = data.get("investment_committee_memo")
         if isinstance(icm, dict):
             risks = icm.get("key_risks_and_mitigants")
             if isinstance(risks, list) and risks:
-                return risks
+                cleaned = []
+                for item in risks:
+                    if isinstance(item, dict):
+                        safe = _sanitize_risk_entry(item)
+                        if safe.get("risk"):
+                            cleaned.append(safe)
+                if cleaned:
+                    return cleaned
 
-        # ── Attempt 2: memo.sections — find section by heading ────────────
-        memo_obj = data.get("memo", data)
-        sections = memo_obj.get("sections") if isinstance(memo_obj, dict) else None
-        if isinstance(sections, list):
-            for sec in sections:
+        # ── Attempt 1b: {"memo": {"key_risks_and_mitigants": [...]}} shape ──
+        memo_inner = data.get("memo")
+        if isinstance(memo_inner, dict):
+            risks = memo_inner.get("key_risks_and_mitigants")
+            if isinstance(risks, list) and risks:
+                cleaned = []
+                for item in risks:
+                    if isinstance(item, dict):
+                        safe = _sanitize_risk_entry(item)
+                        if safe.get("risk"):
+                            cleaned.append(safe)
+                if cleaned:
+                    return cleaned
+
+        # ── Attempt 2: sections array — top-level or nested ──────────────
+        # New format: {"memo": {meta}, "sections": [...]}  ← sections at top level
+        # Legacy:     {"memo": {"sections": [...]}}        ← sections nested inside memo
+        _top_sections = data.get("sections")
+        _memo_obj     = data.get("memo", data)
+        _nested_secs  = _memo_obj.get("sections") if isinstance(_memo_obj, dict) else None
+        sections_list = _top_sections if isinstance(_top_sections, list) else _nested_secs
+
+        if isinstance(sections_list, list):
+            for sec in sections_list:
                 if not isinstance(sec, dict):
                     continue
                 heading = (sec.get("heading") or sec.get("title") or "")
@@ -546,36 +1139,113 @@ def _extract_memo_risks(memo_text: str) -> list:
                     continue
                 content = sec.get("content") or sec.get("body") or ""
 
+                # Content is a list of structured dicts
                 if isinstance(content, list):
-                    return content
+                    cleaned = []
+                    for item in content:
+                        if isinstance(item, dict):
+                            safe = _sanitize_risk_entry(item)
+                            if safe.get("risk"):
+                                cleaned.append(safe)
+                    if cleaned:
+                        return cleaned
 
+                # Content is a numbered text block:
+                # "1. Risk Title: description\n * Mitigant: text\n2. Next Risk: ..."
                 if isinstance(content, str) and content.strip():
-                    blocks = re.split(r"\n(?=\d+\.)", content.strip())
+                    content_clean = _truncate_at_stop_markers(content.strip())
+                    blocks = re.split(r"\n(?=\d+[\.\)])", content_clean)
                     result = []
                     for block in blocks:
                         block = block.strip()
+                        if not block or not re.match(r'^\d+', block):
+                            continue
+                        # Strip leading "1. " or "1) "
+                        block_body = re.sub(r'^\d+[\.\)]\s*', '', block, count=1)
+                        # Extract mitigant (handles "* Mitigant:", "- Mitigant:", "Mitigant:")
+                        mitigant_text = ""
+                        mit_split = re.split(
+                            r'\n\s*[\*\-]?\s*\*{0,2}Mitigant\*{0,2}\s*:',
+                            block_body, maxsplit=1, flags=re.IGNORECASE,
+                        )
+                        if len(mit_split) > 1:
+                            block_body    = mit_split[0].strip()
+                            mitigant_text = mit_split[1].strip()
+                        elif re.search(r'Mitigant\s*:', block_body, re.IGNORECASE):
+                            p = re.split(r'Mitigant\s*:', block_body, maxsplit=1, flags=re.IGNORECASE)
+                            block_body    = p[0].strip()
+                            mitigant_text = p[1].strip()
+                        # Split "Risk Title: description body"
+                        if ": " in block_body:
+                            title_part, desc_part = block_body.split(": ", 1)
+                        else:
+                            title_part, desc_part = block_body, ""
+                        title_part = title_part.strip()
+                        desc_part  = desc_part.strip()
+                        if title_part:
+                            safe = _sanitize_risk_entry({
+                                "risk":        title_part,
+                                "description": desc_part,
+                                "mitigant":    mitigant_text,
+                            })
+                            if safe.get("risk"):
+                                result.append(safe)
+                    if result:
+                        return result
+
+                    # Content is a markdown bullet block:
+                    # "*   **Risk Name (Severity):**\n    *   desc\n    *   Mitigant: ..."
+                    # Split on top-level bold bullets: "*   **Title...**:" or "*   **Title...:**"
+                    # Split on "\n*   **" (bold top-level bullet). The "**" is
+                    # consumed by the split so subsequent blocks start directly
+                    # with the title text (no leading "**").
+                    bold_blocks = re.split(r'\n\*\s+\*\*', content_clean)
+                    result = []
+                    for blk_idx, block in enumerate(bold_blocks):
+                        block = block.strip()
                         if not block:
                             continue
-                        if "Mitigant:" in block:
-                            parts         = block.split("Mitigant:", 1)
-                            risk_text     = parts[0].strip().lstrip("0123456789. ")
-                            mitigant_text = parts[1].strip()
-                        else:
-                            risk_text     = block.lstrip("0123456789. ").strip()
-                            mitigant_text = ""
-                        if risk_text:
-                            result.append({"risk": risk_text, "mitigant": mitigant_text})
+                        # First block is preamble text (before first bold bullet) — skip
+                        if blk_idx == 0 and not re.match(r'[A-Z]', block):
+                            continue
+                        # Extract bold title: **Title text:**
+                        title_match = re.match(r'\*?\*?([^*\n]+?)\*?\*?\s*:', block)
+                        if not title_match:
+                            continue
+                        title_part = title_match.group(1).strip().strip('*').strip()
+                        rest = block[title_match.end():].strip()
+                        # Extract Mitigant line from sub-bullets
+                        mitigant_text = ""
+                        mit_m = re.search(r'Mitigant\s*:\s*(.+?)(?:\n\*|\Z)', rest, re.IGNORECASE | re.DOTALL)
+                        if mit_m:
+                            mitigant_text = mit_m.group(1).strip()
+                            rest = rest[:mit_m.start()].strip()
+                        # Collect description bullets (strip leading "* " from each)
+                        desc_lines = [
+                            re.sub(r'^\s*\*\s*', '', ln).strip()
+                            for ln in rest.split('\n')
+                            if ln.strip() and not ln.strip().startswith('**')
+                        ]
+                        desc_part = ' '.join(desc_lines).strip()
+                        if title_part:
+                            safe = _sanitize_risk_entry({
+                                "risk":        title_part,
+                                "description": desc_part,
+                                "mitigant":    mitigant_text,
+                            })
+                            if safe.get("risk"):
+                                result.append(safe)
                     if result:
                         return result
 
     # ── Attempt 3: Plain text / markdown memo — regex extraction ─────────
     risk_section_match = re.search(
-        r'(?:KEY RISKS|RISKS?\s*&\s*MITIGANTS?|5\.\s*KEY RISKS)(.*?)(?:\n\d+\.\s*[A-Z]|\n#{1,3}\s|\Z)',
+        r'(?:KEY RISKS|RISKS?\s*&\s*MITIGANTS?|5\.\s*KEY RISKS)(.*?)(?:\n\*{0,2}\s*\d+\.\s*[A-Z]|\n#{1,3}\s|\Z)',
         memo_text,
         re.DOTALL | re.IGNORECASE,
     )
     if risk_section_match:
-        risk_text = risk_section_match.group(1).strip()
+        risk_text = _truncate_at_stop_markers(risk_section_match.group(1).strip())
         items = re.split(r'\n(?=\d+\.)', risk_text)
         risks = []
         for item in items:
@@ -601,10 +1271,12 @@ def _extract_memo_risks(memo_text: str) -> list:
             title_line = title_line.replace("**", "").replace("*", "").strip()
             title_line = title_line.rstrip(":").strip()
             if title_line:
-                entry = {"risk": title_line, "mitigant": mitigant}
+                entry = {"risk": title_line, "mitigant": _truncate_at_stop_markers(mitigant)}
                 if description:
-                    entry["description"] = description
-                risks.append(entry)
+                    entry["description"] = _truncate_at_stop_markers(description)
+                safe = _sanitize_risk_entry(entry)
+                if safe.get("risk"):
+                    risks.append(safe)
         if risks:
             return risks
 
@@ -646,11 +1318,11 @@ def _make_docx_bytes(result) -> bytes:
 def _make_json_bytes(result) -> bytes:
     """Serialise the full analysis result to UTF-8 JSON bytes."""
     import json
-    from datetime import datetime
+    from datetime import UTC, datetime
     ds = result.deal_score
     payload = {
         "metadata": {
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
             "version": "0.1.0-mvp",
             "pipeline": "meridian-ai",
         },
@@ -695,6 +1367,96 @@ def _make_json_bytes(result) -> bytes:
     return json.dumps(payload, indent=2, default=str).encode("utf-8")
 
 
+def _persist_analysis(result, source_pdf_path: str, uploaded_name: str) -> None:
+    """Persist PDF, extraction JSON, and memo; log to SQLite.
+
+    Called immediately after a successful analysis while the temp file is still
+    on disk.  Errors are logged but never raised — storage failure must not
+    block the UI.
+    """
+    import json as _json
+    import shutil
+    from datetime import date
+
+    co          = result.extracted_data.get("company_overview", {})
+    company_raw = co.get("company_name") or ""
+    if not company_raw or company_raw == "not_provided":
+        company_raw = os.path.splitext(uploaded_name)[0]
+
+    # Build a filesystem-safe slug: keep alphanumerics + spaces → underscores
+    slug = "".join(c if c.isalnum() or c == " " else "" for c in company_raw)
+    slug = "_".join(slug.split())[:50] or "unknown"
+    file_key = f"{slug}_{date.today().strftime('%Y%m%d')}"
+
+    project_root = os.path.expanduser("~/Downloads/meridian-ai")
+    doc_dir      = os.path.join(project_root, "test_documents")
+    out_dir      = os.path.join(project_root, "output")
+    os.makedirs(doc_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
+
+    errors   = []
+    pdf_dest = source_pdf_path  # fallback
+
+    # 1. Copy PDF to test_documents/
+    try:
+        ext      = os.path.splitext(uploaded_name)[1] or ".pdf"
+        pdf_dest = os.path.join(doc_dir, f"{file_key}{ext}")
+        shutil.copy2(source_pdf_path, pdf_dest)
+    except Exception as _e:
+        errors.append(f"PDF copy: {_e}")
+
+    # 2a. Save raw extraction dict — Critic-compatible (no wrapper)
+    try:
+        ext_path = os.path.join(out_dir, f"{file_key}_extraction.json")
+        with open(ext_path, "w", encoding="utf-8") as _f:
+            _json.dump(result.extracted_data, _f, indent=2, default=str)
+    except Exception as _e:
+        errors.append(f"Extraction JSON save: {_e}")
+
+    # 2b. Save full pipeline payload (metadata + extraction + memo + scores)
+    try:
+        json_path = os.path.join(out_dir, f"{file_key}_analysis.json")
+        with open(json_path, "wb") as _f:
+            _f.write(_make_json_bytes(result))
+    except Exception as _e:
+        errors.append(f"Analysis JSON save: {_e}")
+
+    # 3. Save memo markdown
+    try:
+        memo_path = os.path.join(out_dir, f"{file_key}_memo.md")
+        with open(memo_path, "w", encoding="utf-8") as _f:
+            _f.write(result.memo or "")
+    except Exception as _e:
+        errors.append(f"Memo save: {_e}")
+
+    # 4. Log to SQLite via ApexState
+    try:
+        sys.path.insert(0, os.path.expanduser("~/Projects/apex"))
+        from apex_state import ApexState  # type: ignore
+        _fn = uploaded_name.lower()
+        if "10-k" in _fn or "10k" in _fn:
+            doc_type = "10k"
+        elif "10-q" in _fn or "10q" in _fn:
+            doc_type = "10q"
+        elif "cim" in _fn:
+            doc_type = "cim"
+        else:
+            doc_type = "10k"
+        note = f"Streamlit upload: {uploaded_name}"
+        if errors:
+            note += f" | Errors: {'; '.join(errors)}"
+        ApexState().add_test_document(
+            company=company_raw,
+            sector=co.get("industry") or "Unknown",
+            doc_type=doc_type,
+            source_url=pdf_dest,
+            quality_rating=None,
+            notes=note,
+        )
+    except Exception as _e:
+        errors.append(f"SQLite log failed: {_e}")
+
+
 def _get_pipeline():
     """Initialise and cache the MeridianPipeline."""
     try:
@@ -706,8 +1468,8 @@ def _get_pipeline():
         return None, str(e)
 
 
-def _run_analysis(uploaded_file, profile: str, status):
-    """Run each pipeline step individually so the status label updates in real time."""
+def _run_analysis(uploaded_file, profile: str, progress_cb=None):
+    """Run each pipeline step and emit progress callbacks."""
     from config.scoring_weights import PROFILES
     from core.pipeline import AnalysisResult
     from scoring.deal_scorer import DealScorer
@@ -722,42 +1484,59 @@ def _run_analysis(uploaded_file, profile: str, status):
 
     try:
         _t0 = time.time()
+        if progress_cb:
+            progress_cb(0, "Parsing document...", 0.0)
 
-        status.update(label="Parsing document…")
         _t = time.time()
         document = pipeline._parse_document(tmp_path)
-        print(f"[TIMING] Parse:        {time.time() - _t:.1f}s")
+        if progress_cb:
+            progress_cb(15, "Extracting financials...", time.time() - _t0)
 
-        status.update(label="Extracting financial data…")
+        if progress_cb:
+            progress_cb(15, "Extracting financials...", time.time() - _t0)
         _t = time.time()
         extracted_data = pipeline.extractor.extract(document)
-        print(f"[TIMING] Extract:      {time.time() - _t:.1f}s")
+        if progress_cb:
+            progress_cb(50, "Generating investment memo...", time.time() - _t0)
 
-        status.update(label="Generating investment memo…")
+        # Memo, Risks, and Comps are independent — run them in parallel.
+        if progress_cb:
+            progress_cb(50, "Generating investment memo...", time.time() - _t0)
         _t = time.time()
-        memo = (
-            pipeline.memo_gen.generate(extracted_data)
-            if pipeline.config.enable_memo_generation else ""
-        )
-        print(f"[TIMING] Memo:         {time.time() - _t:.1f}s")
 
-        status.update(label="Analyzing risks…")
-        _t = time.time()
-        risks = (
-            pipeline.risk_analyzer.analyze(extracted_data)
-            if pipeline.config.enable_risk_analysis else []
-        )
-        print(f"[TIMING] Risks:        {time.time() - _t:.1f}s")
+        from concurrent.futures import ThreadPoolExecutor
 
-        status.update(label="Building comparable set…")
-        _t = time.time()
-        comps = (
-            pipeline.comp_builder.build(extracted_data)
-            if pipeline.config.enable_comp_builder else []
-        )
-        print(f"[TIMING] Comps:        {time.time() - _t:.1f}s")
+        def _run_memo():
+            return (
+                pipeline.memo_gen.generate(extracted_data)
+                if pipeline.config.enable_memo_generation else ""
+            )
 
-        status.update(label="Scoring deal…")
+        def _run_risks():
+            return (
+                pipeline.risk_analyzer.analyze(extracted_data)
+                if pipeline.config.enable_risk_analysis else []
+            )
+
+        def _run_comps():
+            return (
+                pipeline.comp_builder.build(extracted_data)
+                if pipeline.config.enable_comp_builder else []
+            )
+
+        with ThreadPoolExecutor(max_workers=3) as _pool:
+            _fut_memo  = _pool.submit(_run_memo)
+            _fut_risks = _pool.submit(_run_risks)
+            _fut_comps = _pool.submit(_run_comps)
+            memo  = _fut_memo.result()
+            risks = _fut_risks.result()
+            comps = _fut_comps.result()
+
+        if progress_cb:
+            progress_cb(90, "Finalizing analysis...", time.time() - _t0)
+
+        if progress_cb:
+            progress_cb(90, "Finalizing analysis...", time.time() - _t0)
         _t = time.time()
         if pipeline.config.enable_deal_scoring:
             _active = st.session_state.get("_scoring_profile", profile)
@@ -782,15 +1561,13 @@ def _run_analysis(uploaded_file, profile: str, status):
             deal_score = DealScorer(_sw).score(extracted_data)
         else:
             deal_score = None
-        print(f"[TIMING] Scoring:      {time.time() - _t:.1f}s")
 
-        status.update(label="Matching PE funds…")
         _t = time.time()
         fund_matches = MatchingEngine().match(extracted_data, top_n=5)
         st.session_state.fund_matches = fund_matches
-        print(f"[TIMING] Fund match:   {time.time() - _t:.1f}s")
+        if progress_cb:
+            progress_cb(100, "Finalizing analysis...", time.time() - _t0)
 
-        print(f"[TIMING] TOTAL:        {time.time() - _t0:.1f}s")
 
         result = AnalysisResult(
             document=document,
@@ -804,6 +1581,25 @@ def _run_analysis(uploaded_file, profile: str, status):
 
         st.session_state.result   = result
         st.session_state.document = document
+        co = extracted_data.get("company_overview", {})
+        fin = extracted_data.get("financials", {})
+        rev = fin.get("revenue", {})
+        deal_stage = "IC Ready" if deal_score else "Deep Diligence"
+        analyzed_card = {
+            "company": co.get("company_name", "Analyzed Deal"),
+            "industry": co.get("industry", "Unknown"),
+            "revenue": rev.get("ltm") if isinstance(rev.get("ltm"), (int, float)) else 0,
+            "grade": getattr(deal_score, "grade", "B"),
+            "days": 1,
+            "stage": deal_stage,
+        }
+        existing = st.session_state.get("analyzed_deals", [])
+        st.session_state["analyzed_deals"] = [
+            d for d in existing if d.get("company") != analyzed_card["company"]
+        ] + [analyzed_card]
+
+        _persist_analysis(result, tmp_path, uploaded_file.name)
+
         return result, None
 
     except Exception as exc:
@@ -818,6 +1614,8 @@ def _run_analysis(uploaded_file, profile: str, status):
 
 def _on_profile_select():
     """Sync sliders to the chosen preset when the dropdown changes."""
+    if "_scoring_profile" not in st.session_state:
+        return
     sel = st.session_state["_scoring_profile"]
     if sel in _PRESET_WEIGHTS:
         for dim, _, _, _ in _SLIDER_DIMS:
@@ -826,6 +1624,8 @@ def _on_profile_select():
 
 def _on_weight_slider():
     """Switch profile label to a matching preset or 'Custom' when sliders move."""
+    if any(f"_w_{dim}" not in st.session_state for dim, _, _, _ in _SLIDER_DIMS):
+        return
     current = {dim: st.session_state[f"_w_{dim}"] for dim, _, _, _ in _SLIDER_DIMS}
     for pname, pvals in _PRESET_WEIGHTS.items():
         if current == pvals:
@@ -841,18 +1641,25 @@ def _on_weight_slider():
 with st.sidebar:
     # Logo
     st.markdown(
-        "<div class='meridian-logo'>Meridian <span>AI</span></div>"
-        "<div class='meridian-tagline'>PE Deal Intelligence</div>",
+        """
+        <a class="meridian-home-link" href="?home=1">
+            <div class="meridian-home-logo">
+                <span class="meridian-home-meridian">Meridian</span>
+                <span class="meridian-home-ai"> AI</span>
+            </div>
+            <div class="meridian-tagline">PE Deal Intelligence</div>
+        </a>
+        """,
         unsafe_allow_html=True,
     )
     st.markdown("---")
 
     # Upload
-    st.markdown("<div class='section-label'>Upload CIM</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-label'>Upload Document</div>", unsafe_allow_html=True)
     uploaded_file = st.file_uploader(
         "Select a PDF or DOCX",
         type=["pdf", "docx", "doc"],
-        help="Confidential Information Memorandum",
+        help="CIM / 10-K / S-1 document",
         label_visibility="collapsed",
     )
 
@@ -904,11 +1711,18 @@ with st.sidebar:
             st.checkbox(_sec_label, key=f"_msec_{_sec_key}")
 
     analyze_btn = st.button(
-        "Analyze CIM",
+        "Analyze",
         type="primary",
-        use_container_width=True,
+        width="stretch",
         disabled=(uploaded_file is None),
     )
+    if st.button("View Pipeline", width="stretch"):
+        st.session_state["_preview_panel"] = "pipeline"
+    st.markdown("---")
+    st.markdown("<div class='section-label'>Portfolio</div>", unsafe_allow_html=True)
+    if st.button("Portfolio Intelligence", width="stretch"):
+        st.session_state["_preview_panel"] = "portfolio"
+    st.caption("Cross-portfolio reporting and health monitoring.")
 
     # ── Post-analysis sidebar content ────────────────────────────────────
     if st.session_state.result:
@@ -990,7 +1804,7 @@ with st.sidebar:
                 data=st.session_state["_xlsx_bytes"],
                 file_name=f"{company_slug}_analysis.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
+                width="stretch",
             )
         else:
             st.caption(f"Excel unavailable: {st.session_state['_xlsx_err']}")
@@ -1001,7 +1815,7 @@ with st.sidebar:
                 data=st.session_state["_docx_bytes"],
                 file_name=f"{company_slug}_memo.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
+                width="stretch",
             )
         else:
             st.caption(f"Word unavailable: {st.session_state['_docx_err']}")
@@ -1012,11 +1826,10 @@ with st.sidebar:
                 data=st.session_state["_json_bytes"],
                 file_name=f"{company_slug}_raw.json",
                 mime="application/json",
-                use_container_width=True,
+                width="stretch",
             )
         else:
             st.caption(f"JSON unavailable: {st.session_state['_json_err']}")
-
 
 # ---------------------------------------------------------------------------
 # Pipeline initialisation
@@ -1034,7 +1847,8 @@ if st.session_state.pipeline is None:
 # Analysis trigger
 # ---------------------------------------------------------------------------
 
-if analyze_btn and uploaded_file:
+def _execute_analysis_workflow(uploaded_file, scoring_profile: str):
+    st.session_state["_preview_panel"] = None
     st.session_state.result       = None
     st.session_state.document     = None
     st.session_state.messages     = []
@@ -1042,25 +1856,64 @@ if analyze_btn and uploaded_file:
 
     start_time = time.time()
 
-    with st.status("Analyzing CIM…", expanded=True) as _status:
-        result, err = _run_analysis(uploaded_file, scoring_profile, _status)
-        if err:
-            _status.update(label="Analysis failed.", state="error")
-        else:
-            elapsed = time.time() - start_time
-            _status.update(
-                label=f"Analysis complete — {elapsed:.1f}s",
-                state="complete",
-            )
+    _progress_text = st.empty()
+    _progress_bar = st.progress(0)
+
+    def _progress_cb(pct: int, label: str, _elapsed: float):
+        _progress_bar.progress(int(max(0, min(100, pct))))
+        _progress_text.caption(label)
+
+    result, err = _run_analysis(uploaded_file, scoring_profile, _progress_cb)
+    if err:
+        _progress_bar.progress(100)
+        _progress_text.caption("Analysis failed")
+    else:
+        elapsed = time.time() - start_time
+        _progress_bar.progress(100)
+        _progress_text.caption(f"Completed in {int(round(elapsed))}s")
 
     if err:
         st.error(f"Analysis failed: {err}")
     else:
+        st.session_state["_pipeline_inline_upload"] = False
         st.rerun()
+
+
+if analyze_btn and uploaded_file:
+    if getattr(uploaded_file, "size", 0) and uploaded_file.size > 200 * 1024 * 1024:
+        st.error("File exceeds 200MB limit.")
+    else:
+        _execute_analysis_workflow(uploaded_file, scoring_profile)
 
 # ---------------------------------------------------------------------------
 # Results tabs
 # ---------------------------------------------------------------------------
+
+_preview_panel = st.session_state.get("_preview_panel")
+if _preview_panel in ("portfolio", "compare", "pipeline"):
+    _panel_title = {
+        "portfolio": "Portfolio Intelligence",
+        "compare": "Deal Comparison",
+        "pipeline": "Deal Pipeline Dashboard",
+    }.get(_preview_panel, "Meridian")
+    c_prev, c_close = st.columns([6, 1])
+    with c_prev:
+        st.markdown(
+            f"<h3 style='color:#e8e8e8;margin-bottom:0.2rem'>{_panel_title}</h3>",
+            unsafe_allow_html=True,
+        )
+    with c_close:
+        if st.button("Back", width="stretch", key="_preview_back"):
+            st.session_state["_preview_panel"] = None
+            st.rerun()
+
+    if _preview_panel == "portfolio":
+        _render_portfolio_view(show_title=False)
+    elif _preview_panel == "compare":
+        _render_compare_view()
+    else:
+        _render_pipeline_dashboard(show_title=False)
+    st.stop()
 
 if st.session_state.result:
     result = st.session_state.result
@@ -1085,16 +1938,59 @@ if st.session_state.result:
     st.caption("  ·  ".join(p for p in detail_parts if p))
 
     # ── Key metrics strip ─────────────────────────────────────────────────
-    cols = st.columns(5)
+    def _is_missing(v):
+        return v is None or v == "not_provided"
+    def _to_num(v):
+        if _is_missing(v):
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    ebitda_ltm_val = ebitda.get("ltm")
+    adj_ebitda_val = ebitda.get("adjusted_ebitda_ltm")
+    derived_ebitda_val = ebitda.get("derived_ebitda")
+    selected_ebitda_val = ebitda_ltm_val
+    if not _is_missing(ebitda_ltm_val):
+        ebitda_label = "EBITDA (LTM)"
+        selected_ebitda_val = ebitda_ltm_val
+    elif not _is_missing(adj_ebitda_val):
+        ebitda_label = "Adj. EBITDA (LTM)"
+        selected_ebitda_val = adj_ebitda_val
+    elif not _is_missing(derived_ebitda_val):
+        ebitda_label = "Est. EBITDA (LTM)"
+        selected_ebitda_val = derived_ebitda_val
+    else:
+        ebitda_label = "EBITDA (LTM)"
+        selected_ebitda_val = ebitda_ltm_val
+    ebitda_value = _fmt_num(selected_ebitda_val)
+
+    margin_val = ebitda.get("margin_ltm")
+    margin_label = "EBITDA Margin"
+    if _is_missing(margin_val):
+        rev_num = _to_num(rev.get("ltm"))
+        ebitda_num = _to_num(selected_ebitda_val)
+        if rev_num and rev_num != 0 and ebitda_num is not None:
+            margin_val = ebitda_num / rev_num
+            margin_label = "Est. EBITDA Margin"
+
+    cols = st.columns(5, gap="small")
     metrics = [
         ("Revenue (LTM)",   _fmt_num(rev.get("ltm"))),
-        ("EBITDA (LTM)",    _fmt_num(ebitda.get("ltm"))),
-        ("EBITDA Margin",   _fmt_pct(ebitda.get("margin_ltm"))),
+        (ebitda_label,      ebitda_value),
+        (margin_label,      _fmt_pct(margin_val)),
         ("Revenue CAGR",    _fmt_pct(rev.get("cagr_3yr"))),
         ("Recurring Rev %", _fmt_pct(fin.get("recurring_revenue_pct"))),
     ]
     for col, (label, val) in zip(cols, metrics):
-        col.metric(label, val)
+        col.markdown(
+            "<div class='hero-metric-card'>"
+            f"<div class='hero-metric-label'>{label}</div>"
+            f"<div class='hero-metric-value'>{val}</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
     st.markdown("---")
 
@@ -1106,13 +2002,36 @@ if st.session_state.result:
     # ── Tab: Memo ─────────────────────────────────────────────────────────
     with tab_memo:
         if result.memo:
+            st.markdown("<div class='memo-content'>", unsafe_allow_html=True)
             _render_memo(result.memo)
+            st.markdown("</div>", unsafe_allow_html=True)
         else:
             st.info("Memo generation was disabled or not yet run.")
 
     # ── Tab: Financials ───────────────────────────────────────────────────
     with tab_fin:
+        import altair as alt
+        import pandas as pd
         customers = result.extracted_data.get("customers", {})
+
+        # Currency badge — show when non-USD or when explicitly stated
+        _currency = _fmt_str(fin.get("currency"))
+        if _currency not in ("N/A", "", "USD"):
+            st.warning(
+                f"**Currency: {_currency}** — All figures reported in {_currency}, not USD.",
+                icon="⚠️",
+            )
+        elif _currency == "USD":
+            st.caption("All figures in USD.")
+
+        rev_cite_ltm = rev.get("ltm_citation")
+        rev_cite_cagr = rev.get("cagr_3yr_citation")
+        ebitda_cite_ltm = ebitda.get("ltm_citation")
+        ebitda_cite_adj = ebitda.get("adjusted_ebitda_ltm_citation")
+        ebitda_cite_margin = ebitda.get("margin_ltm_citation")
+        gross_margin_cite = fin.get("gross_margin_citation")
+        capex_cite = fin.get("capex_citation")
+        top_customer_cite = customers.get("top_customer_concentration_citation")
 
         c1, c2 = st.columns(2)
         with c1:
@@ -1121,20 +2040,20 @@ if st.session_state.result:
                 unsafe_allow_html=True,
             )
             fin_rows = {
-                "Revenue LTM":          _fmt_num(rev.get("ltm")),
-                "Revenue (Prior Year)": _fmt_num(rev.get("prior_year")),
-                "Revenue (2yr Ago)":    _fmt_num(rev.get("two_years_ago")),
-                "CAGR (3yr)":           _fmt_pct(rev.get("cagr_3yr")),
-                "EBITDA LTM":           _fmt_num(ebitda.get("ltm")),
-                "Adjusted EBITDA":      _fmt_num(ebitda.get("adjusted_ebitda_ltm")),
-                "EBITDA Margin":        _fmt_pct(ebitda.get("margin_ltm")),
-                "Gross Margin":         _fmt_pct(fin.get("gross_margin")),
-                "Net Income":           _fmt_num(fin.get("net_income")),
+                "Revenue LTM":          (_fmt_num(rev.get("ltm")), rev_cite_ltm),
+                "Revenue (Prior Year)": (_fmt_num(rev.get("prior_year")), None),
+                "Revenue (2yr Ago)":    (_fmt_num(rev.get("two_years_ago")), None),
+                "CAGR (3yr)":           (_fmt_pct(rev.get("cagr_3yr")), rev_cite_cagr),
+                "EBITDA LTM":           (_fmt_num(ebitda.get("ltm")), ebitda_cite_ltm),
+                "Adjusted EBITDA":      (_fmt_num(ebitda.get("adjusted_ebitda_ltm")), ebitda_cite_adj),
+                "EBITDA Margin":        (_fmt_pct(ebitda.get("margin_ltm")), ebitda_cite_margin),
+                "Gross Margin":         (_fmt_pct(fin.get("gross_margin")), gross_margin_cite),
+                "Net Income":           (_fmt_num(fin.get("net_income")), None),
             }
-            for label, val in fin_rows.items():
+            for label, (val, cite) in fin_rows.items():
                 cc1, cc2 = st.columns([2, 1])
                 cc1.write(label)
-                cc2.write(f"**{val}**")
+                cc2.markdown(_metric_with_page(val, cite), unsafe_allow_html=True)
 
         with c2:
             st.markdown(
@@ -1142,38 +2061,76 @@ if st.session_state.result:
                 unsafe_allow_html=True,
             )
             bs_rows = {
-                "Total Debt":            _fmt_num(fin.get("debt")),
-                "Cash & Equivalents":   _fmt_num(fin.get("cash")),
-                "CapEx (Annual)":        _fmt_num(fin.get("capex")),
-                "Recurring Revenue %":  _fmt_pct(fin.get("recurring_revenue_pct")),
-                "Total Customers":       str(customers.get("total_customers", "N/A")),
-                "Top Customer Conc.":   _fmt_pct(customers.get("top_customer_concentration")),
-                "Top 10 Conc.":         _fmt_pct(customers.get("top_10_concentration")),
-                "Customer Retention":   _fmt_pct(customers.get("customer_retention")),
-                "Net Revenue Retention": _fmt_pct(customers.get("net_revenue_retention")),
+                "Total Debt":             (_fmt_num(fin.get("debt")), None),
+                "Cash & Equivalents":     (_fmt_num(fin.get("cash")), None),
+                "CapEx (Annual)":         (_fmt_num(fin.get("capex")), capex_cite),
+                "Recurring Revenue %":    (_fmt_pct(fin.get("recurring_revenue_pct")), None),
+                "Total Customers":        (_fmt_str(customers.get("total_customers")), None),
+                "Top Customer Conc.":     (_fmt_pct(customers.get("top_customer_concentration")), top_customer_cite),
+                "Top 10 Conc.":           (_fmt_pct(customers.get("top_10_concentration")), None),
+                "Customer Retention":     (_fmt_pct(customers.get("customer_retention")), None),
+                "Net Revenue Retention":  (_fmt_pct(customers.get("net_revenue_retention")), None),
             }
-            for label, val in bs_rows.items():
+            for label, (val, cite) in bs_rows.items():
                 cc1, cc2 = st.columns([2, 1])
                 cc1.write(label)
-                cc2.write(f"**{val}**")
+                cc2.markdown(_metric_with_page(val, cite), unsafe_allow_html=True)
+
+        rev_points = [
+            ("2yr Ago", rev.get("two_years_ago")),
+            ("Prior Year", rev.get("prior_year")),
+            ("LTM", rev.get("ltm")),
+        ]
+        rev_chart_rows = [
+            {"Period": p, "RevenueM": float(v) / 1_000_000}
+            for p, v in rev_points
+            if isinstance(v, (int, float))
+        ]
+        if rev_chart_rows:
+            st.caption("Revenue Trend")
+            rev_df = pd.DataFrame(rev_chart_rows)
+            rev_chart = (
+                alt.Chart(rev_df)
+                .mark_bar(color="#6f91ff", cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+                .encode(
+                    x=alt.X("Period:N", sort=["2yr Ago", "Prior Year", "LTM"], title=None, axis=alt.Axis(labelAngle=0)),
+                    y=alt.Y("RevenueM:Q", title=f"Revenue ({_currency}M)", axis=alt.Axis(format=",.0f")),
+                    tooltip=["Period", alt.Tooltip("RevenueM:Q", format=",.1f", title=f"Revenue ({_currency}M)")],
+                )
+                .properties(height=220)
+            )
+            st.altair_chart(rev_chart, width="stretch")
 
         # Revenue by segment
         segments = fin.get("revenue_by_segment", [])
         if segments:
-            st.markdown("---")
-            st.markdown(
-                "<div class='section-label'>Revenue by Segment</div>",
-                unsafe_allow_html=True,
+            st.caption("Revenue by Segment")
+            seg_rows = []
+            for seg in segments:
+                if not isinstance(seg, dict):
+                    continue
+                yoy = seg.get("growth_rate")
+                yoy_fmt = _fmt_pct(yoy) if yoy not in (None, "not_provided") else "N/A"
+                if yoy_fmt != "N/A":
+                    yoy_fmt = f"{yoy_fmt} YoY"
+                seg_rows.append({
+                    "Segment name": seg.get("segment", "N/A"),
+                    "Dollar amount": _fmt_num(seg.get("revenue")),
+                    "% of total": _fmt_pct(seg.get("pct_of_total")),
+                    "YoY growth": yoy_fmt,
+                })
+            seg_df = pd.DataFrame(seg_rows)
+            st.dataframe(
+                seg_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Segment name": st.column_config.TextColumn(width="large"),
+                    "Dollar amount": st.column_config.TextColumn(width="medium"),
+                    "% of total": st.column_config.TextColumn(width="small"),
+                    "YoY growth": st.column_config.TextColumn(width="small"),
+                },
             )
-            import pandas as pd
-            seg_df = pd.DataFrame(segments)
-            if "pct_of_total" in seg_df.columns:
-                seg_df["pct_of_total"] = seg_df["pct_of_total"].apply(
-                    lambda x: _fmt_pct(x) if x else "N/A"
-                )
-            if "revenue" in seg_df.columns:
-                seg_df["revenue"] = seg_df["revenue"].apply(_fmt_num)
-            st.dataframe(seg_df, use_container_width=True, hide_index=True)
 
     # ── Tab: Risks ────────────────────────────────────────────────────────
     with tab_risks:
@@ -1186,36 +2143,7 @@ if st.session_state.result:
         if not has_any:
             st.info("No risks identified (or risk analysis was disabled).")
 
-        # ── Section 1: Diligence Risks from Memo ─────────────────────────
-        # Flat sibling if-block — not nested inside the has_any else branch
-        if memo_risks:
-            st.markdown("### Diligence Risks from Memo")
-            st.caption("Qualitative risks identified through AI analysis of the CIM narrative.")
-            for item in memo_risks:
-                if isinstance(item, dict):
-                    title       = (item.get("risk") or item.get("title") or "").strip()
-                    description = (item.get("description") or "").strip()
-                    mitigant    = (item.get("mitigant") or item.get("mitigation") or "").strip()
-                    label       = item.get("risk", "")
-                    if ": " in label and len(label) > 80:
-                        label = label.split(": ")[0]
-                    label = label[:80] or description[:80]
-                    if not label:
-                        continue
-                    with st.expander(label, expanded=True):
-                        if description:
-                            st.markdown(_escape_dollars(description))
-                        else:
-                            st.markdown(f"**{_escape_dollars(title)}**")
-                        if mitigant:
-                            st.success(f"**Mitigant:** {_escape_dollars(mitigant)}")
-                elif isinstance(item, str) and item.strip():
-                    with st.expander(item.strip()[:80], expanded=True):
-                        st.markdown(f"**{_escape_dollars(item.strip())}**")
-
         if llm_risks:
-            if memo_risks:
-                st.markdown("---")
             st.markdown("### Diligence Risks (AI Risk Analyzer)")
             st.caption("Risks identified through structured AI analysis.")
             for risk in llm_risks:
@@ -1240,7 +2168,7 @@ if st.session_state.result:
         # Also a flat sibling — always rendered independently
         if heuristic_risks:
             if memo_risks or llm_risks:
-                st.markdown("---")
+                st.divider()
             st.markdown("### Automated Flags")
             st.caption("Rule-based checks triggered by extracted financial and operational metrics.")
             for risk in heuristic_risks:
@@ -1259,6 +2187,34 @@ if st.session_state.result:
                     if risk.diligence_question:
                         st.info(f"**Diligence:** {_escape_dollars(risk.diligence_question)}")
 
+        st.divider()
+        st.markdown("### Diligence Risks from Memo")
+        st.caption("Qualitative risks parsed from the investment memo.")
+        if memo_risks:
+            for item in memo_risks:
+                if isinstance(item, dict):
+                    title = (item.get("risk") or item.get("title") or "").strip()
+                    description = (item.get("description") or "").strip()
+                    mitigant = (item.get("mitigant") or item.get("mitigation") or "").strip()
+                    label = item.get("risk", "")
+                    if ": " in label and len(label) > 80:
+                        label = label.split(": ")[0]
+                    label = label[:80] or description[:80]
+                    if not label:
+                        continue
+                    with st.expander(label, expanded=False):
+                        if description:
+                            st.markdown(_escape_dollars(description))
+                        else:
+                            st.markdown(f"**{_escape_dollars(title)}**")
+                        if mitigant:
+                            st.success(f"**Mitigant:** {_escape_dollars(mitigant)}")
+                elif isinstance(item, str) and item.strip():
+                    with st.expander(item.strip()[:80], expanded=False):
+                        st.markdown(f"**{_escape_dollars(item.strip())}**")
+        else:
+            st.caption("No memo-derived diligence risks available.")
+
         if has_any:
             st.caption("Meridian AI · Risk Assessment")
 
@@ -1274,6 +2230,7 @@ if st.session_state.result:
             )
             for _icon, _title, _body in _sector_flags:
                 st.info(f"**{_icon} {_title}** — {_body}")
+
 
     # ── Tab: Comps ────────────────────────────────────────────────────────
     with tab_comps:
@@ -1330,7 +2287,7 @@ if st.session_state.result:
                     "Key Differences": c.key_differences,
                 })
             comp_df = pd.DataFrame(rows)
-            st.dataframe(comp_df, use_container_width=True, hide_index=True)
+            st.dataframe(comp_df, width="stretch", hide_index=True)
 
         # PE Fund Matches — always visible
         st.markdown("---")
@@ -1348,16 +2305,18 @@ if st.session_state.result:
                 ):
                     c1, c2 = st.columns([3, 1])
                     with c1:
-                        st.markdown(f"**Thesis:** {m.fund.thesis_summary}")
+                        st.markdown(f"**Thesis:** {_escape_dollars(m.fund.thesis_summary)}")
                         st.caption(
-                            f"{m.fund.headquarters}  ·  {m.fund.fund_size_category} Market  ·  "
-                            f"${m.fund.check_size_min_mm}M–${m.fund.check_size_max_mm}M checks  ·  "
-                            f"{m.fund.investment_style}"
+                            _escape_dollars(
+                                f"{m.fund.headquarters}  ·  {m.fund.fund_size_category} Market  ·  "
+                                f"${m.fund.check_size_min_mm}M–${m.fund.check_size_max_mm}M checks  ·  "
+                                f"{m.fund.investment_style}"
+                            )
                         )
                         for reason in m.reasons[:4]:
-                            st.write(f"✓ {reason}")
+                            st.write(_escape_dollars(f"✓ {reason}"))
                         for concern in m.concerns:
-                            st.write(f"⚠ {concern}")
+                            st.write(_escape_dollars(f"⚠ {concern}"))
                     with c2:
                         sub_scores = {
                             "Industry":  m.industry_score,
@@ -1424,12 +2383,12 @@ if st.session_state.result:
     # ── Tab: Q&A ──────────────────────────────────────────────────────────
     with tab_qa:
         st.markdown(
-            "<div class='section-label'>Ask the CIM</div>",
+            "<div class='section-label'>Ask the Document</div>",
             unsafe_allow_html=True,
         )
         st.caption(
             "Ask any question about this deal. Answers are grounded in the "
-            "parsed CIM document and extracted data."
+            "parsed document and extracted data."
         )
 
         for msg in st.session_state.messages:
@@ -1458,46 +2417,7 @@ if st.session_state.result:
                 st.session_state.messages.append({"role": "assistant", "content": answer})
 
 else:
-    # ── Landing state ─────────────────────────────────────────────────────
-    st.markdown(
-        """
-        <div style='text-align:center;padding:7rem 2rem 4rem;max-width:520px;margin:0 auto'>
-            <div style='font-size:3.2rem;font-weight:900;color:#e8e8e8;
-                        letter-spacing:-1.5px;line-height:1;margin-bottom:0.5rem'>
-                Meridian <span style='color:#E07A5F'>AI</span>
-            </div>
-            <p style='font-size:1rem;color:#8888aa;margin-bottom:0;line-height:1.7'>
-                PE Deal Intelligence Engine<br>
-                Upload a CIM to generate an IC memo, risk register,<br>
-                deal score, and PE fund matches.
-            </p>
-            <p style='margin-top:3rem;color:#555577;font-size:0.82rem;
-                      letter-spacing:0.05em;text-transform:uppercase'>
-                Upload a CIM using the sidebar to begin
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        """
-        <div style='text-align:center;max-width:480px;margin:0 auto;padding:0 2rem 5rem'>
-            <p style='color:#3d3d5c;font-size:0.72rem;font-weight:700;
-                      letter-spacing:0.12em;text-transform:uppercase;margin-bottom:0.6rem'>
-                Coming Soon
-            </p>
-            <p style='color:#3d3d5c;font-size:0.8rem;line-height:2;margin:0'>
-                · PitchBook &amp; Capital IQ integration — auto-populate comp sets<br>
-                · CRM sync — Affinity, DealCloud, Salesforce<br>
-                · Data room ingestion — bulk analyze 100+ documents<br>
-                · Custom IC memo templates per firm<br>
-                · Deal pipeline dashboard with historical scoring<br>
-                · Portfolio company benchmarking
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    _render_pipeline_dashboard()
 
 # ---------------------------------------------------------------------------
 # Footer
