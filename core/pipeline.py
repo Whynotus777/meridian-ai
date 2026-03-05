@@ -22,6 +22,8 @@ from core.comp_builder import CompBuilder, Comparable
 from core.qa_engine import QAEngine
 from scoring.deal_scorer import DealScorer, DealScore
 from output.json_export import export_full_analysis
+from core.insights import generate_insights
+from core.deal_store import save_deal, get_peer_deals
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +76,24 @@ def detect_narrative_gaps(
 
     if not memo_data:
         return gaps
+
+    # ── Extract plain text from JSON memo if applicable ────────────────────
+    memo_text = memo_data
+    try:
+        parsed = json.loads(memo_data)
+        if isinstance(parsed, dict):
+            parts = []
+            for section in (parsed.get("sections") or []):
+                heading = section.get("heading") or section.get("title") or ""
+                content = section.get("content") or ""
+                if heading:
+                    parts.append(f"## {heading}")
+                if isinstance(content, str):
+                    parts.append(content)
+            if parts:
+                memo_text = "\n\n".join(parts)
+    except (json.JSONDecodeError, TypeError):
+        pass
 
     # ── Extract key metrics ────────────────────────────────────────────────
     fin       = extraction.get("financials", {})
@@ -146,7 +166,7 @@ def detect_narrative_gaps(
         })
 
     # ── Per-sentence quantitative checks ──────────────────────────────────
-    sentences = _split_sentences(memo_data)
+    sentences = _split_sentences(memo_text)
     seen = {k: False for k in ("revenue", "ebitda", "ebitda_margin", "gross_margin",
                                 "cagr", "recurring_pct", "retention")}
 
@@ -296,7 +316,7 @@ def detect_narrative_gaps(
                              sev)
 
     # ── Qualitative keyword checks ─────────────────────────────────────────
-    memo_lower = memo_data.lower()
+    memo_lower = memo_text.lower()
 
     # High recurring revenue
     if re.search(r'\bhigh recurring\b|\bstrongly recurring\b|\bhighly recurring\b', memo_lower):
@@ -375,6 +395,32 @@ def detect_narrative_gaps(
             _add("Consistent revenue growth", "Memo (qualitative)",
                  "N/A (no history extracted)", "unverifiable", None, "info")
 
+    # ── Never return empty — fallback from extraction data ─────────────────
+    if not gaps:
+        _note = (
+            "No verifiable narrative claims detected in memo text. "
+            "Showing extracted metrics for manual verification."
+        )
+        for label, val, is_pct in [
+            ("Revenue (LTM)",        rev_ltm,           False),
+            ("EBITDA (LTM)",         ebitda_ltm,        False),
+            ("EBITDA Margin",        ebitda_margin,     True),
+            ("Gross Margin",         gross_margin,      True),
+            ("Revenue CAGR (3yr)",   cagr_3yr,          True),
+            ("Recurring Revenue %",  recurring_rev_pct, True),
+            ("Customer Retention %", retention,         True),
+        ]:
+            if val is not None:
+                fmt_val = _fmt_pct(val) if is_pct else _fmt_dollar(val)
+                _add(
+                    f"{label} = {fmt_val}",
+                    "Extracted data (no memo claim)",
+                    fmt_val,
+                    "unverifiable",
+                    _note,
+                    "info",
+                )
+
     return gaps
 
 
@@ -393,6 +439,7 @@ class AnalysisResult:
     deal_score: DealScore
     timing: Dict[str, float]
     narrative_gaps: List[Dict[str, Any]] = field(default_factory=list)
+    insights: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class MeridianPipeline:
@@ -511,7 +558,7 @@ class MeridianPipeline:
         timing["total"] = total_time
         self._log(f"\nPipeline complete in {total_time:.1f}s")
 
-        return AnalysisResult(
+        result = AnalysisResult(
             document=document,
             extracted_data=extracted_data,
             memo=memo,
@@ -521,6 +568,27 @@ class MeridianPipeline:
             timing=timing,
             narrative_gaps=narrative_gaps,
         )
+
+        # Persist + generate insights (best-effort — never block the pipeline)
+        try:
+            doc_name = os.path.basename(filepath)
+            deal_id = save_deal(
+                result,
+                document_name=doc_name,
+                pages=document.total_pages,
+                duration=total_time,
+            )
+            industry = extracted_data.get("company_overview", {}).get("industry", "")
+            peers = get_peer_deals(industry, exclude_id=deal_id)
+            result.insights = generate_insights(extracted_data, peer_deals=peers or None)
+            self._log(
+                f"  Saved deal {deal_id[:8]}… | "
+                f"{len(peers)} peer(s) | {len(result.insights)} insight(s)"
+            )
+        except Exception as exc:
+            self._log(f"  [deal_store] skipped: {exc}")
+
+        return result
 
     def ask(
         self,
