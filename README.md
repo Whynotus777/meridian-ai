@@ -1,72 +1,73 @@
-# Meridian AI — PE Deal Intelligence Engine
-
-> Working name. Replace before shipping.
+# Meridian AI — PE Deal Intelligence Platform
 
 ## What It Does
-
-Upload a CIM (Confidential Information Memorandum) PDF/DOCX → get back:
-1. **Structured financial extraction** (revenue, EBITDA, margins, growth, customer concentration)
-2. **Auto-generated investment memo** (IC-ready, with thesis, risks, key questions)
-3. **Comparable company/transaction sets**
-4. **Risk flags** (customer concentration, key-person, regulatory, financial inconsistencies)
-5. **Deal score** (configurable weights per firm's criteria)
-6. **Natural language Q&A** over the document
+90-second CIM/10-K to IC memo pipeline. Upload a document, get: extracted financials with confidence scores, investment committee memo, risk analysis, deal scoring, fund matching, and Excel/Word export.
 
 ## Architecture
+- **app.py** — Streamlit UI (pipeline dashboard, 6 analysis tabs, portfolio view, comparison view)
+- **core/pipeline.py** — Orchestration, parallel memo+risks+comps generation
+- **core/extractor.py** — Document parsing + LLM extraction with context windowing
+- **prompts/extraction.py** — Extraction prompt (v1) with analyst reasoning principles + memo generation prompt
+- **parsers/pdf_parser.py** — PDF/DOCX/HTM parser using PyMuPDF
+- **scoring/deal_scorer.py** — 5-dimension scoring (Market, Financial Quality, Growth, Management, Risk)
+- **scoring/fund_matcher.py** — PE fund matching with sector penalty scoring
+- **output/excel_export.py** — Excel export with financials, risk register, comp set, fund matches
 
-```
-meridian-ai/
-├── config/
-│   ├── settings.py          # Global config, API keys, model selection
-│   └── scoring_weights.py   # Configurable scoring weights per firm
-├── core/
-│   ├── __init__.py
-│   ├── pipeline.py           # Main orchestrator: CIM → full analysis
-│   ├── extractor.py          # LLM-powered structured data extraction
-│   ├── memo_generator.py     # Investment memo drafting
-│   ├── comp_builder.py       # Comparable company/transaction sets
-│   ├── risk_analyzer.py      # Red flag detection
-│   └── qa_engine.py          # Natural language Q&A over documents
-├── parsers/
-│   ├── __init__.py
-│   ├── pdf_parser.py         # PDF → structured text + tables
-│   ├── docx_parser.py        # DOCX → structured text + tables
-│   └── table_extractor.py    # Financial table detection and extraction
-├── scoring/
-│   ├── __init__.py
-│   ├── deal_scorer.py        # Multi-dimensional deal scoring
-│   └── fund_matcher.py       # PE fund matching (from your D.E. Shaw work)
-├── output/
-│   ├── __init__.py
-│   ├── excel_export.py       # Export financials to Excel
-│   ├── memo_formatter.py     # Format memo as DOCX/PDF
-│   └── json_export.py        # Structured JSON output
-├── prompts/
-│   ├── extraction.py         # Extraction prompt templates
-│   ├── memo.py               # Memo generation prompts
-│   ├── risk.py               # Risk analysis prompts
-│   └── qa.py                 # Q&A prompt templates
-├── data/
-│   └── pe_fund_universe.json # PE fund database (from your case study)
-├── tests/
-│   └── test_pipeline.py      # End-to-end tests
-├── main.py                   # CLI entry point
-├── requirements.txt
-└── README.md
-```
+## Key Design Decisions
+- **v1 extraction + programmatic citations** (not v2 single-call) — better quality
+- **Analyst reasoning principles** in extraction prompt: derivation, normalization, completeness, inference, confidence scoring, schema additions
+- **Canonical memo format** enforced via prompt (title/date/prepared_by/sections array)
+- **Critic validation** for derived fields (math reconciliation within 5%)
+- **Aggressive extraction + strict validation** philosophy
 
-## Phase Roadmap
+## Current Status (March 2026)
+### Working Well
+- Financial extraction: 90%+ accuracy across CIMs and 10-Ks
+- Revenue, EBITDA (stated/derived/normalized), margins, CapEx, FCF, debt, cash
+- Revenue segments, revenue history with YoY growth
+- IC memo generation with 8 standard sections
+- Automated risk flags + sector-specific risk profiles
+- Deal scoring with letter grades
+- Pipeline dashboard, comparison view, portfolio view
+- Excel + Word export
+- Currency detection (USD/CAD)
+- EBITDA variant recognition (Normalized, Adjusted, Pro Forma)
 
-- **Phase 1 (MVP)**: CIM analysis, memo gen, comp sets, risk flags, deal scoring
-- **Phase 2**: Data room ingestion, contract analysis, diligence accelerator
-- **Phase 3**: Portfolio monitoring, LP reporting, value creation tracking
-- **Phase 4**: Deal sourcing, sector expansion, CRM integrations
+### Known Issues
+- Fund matching returns irrelevant results for non-tech sectors (software PE bias in fund database)
+- Revenue segments missed when data is qualitative or in charts (not tables)
+- Memo format occasionally deviates from canonical schema despite prompt enforcement
+- Comp set requires API integration (PitchBook/Capital IQ) for financial multiples
+- Scoring weights may need per-sector tuning
 
-## Quick Start
+### Tested Documents
+| Document | Type | Industry | Revenue | Result |
+|---|---|---|---|---|
+| Instructure 10-K | SEC Filing | EdTech/SaaS | $258M | Full extraction ✅ |
+| ACEP CIM | Sell-side CIM | Gaming | $430M | Full extraction ✅ |
+| Acme Surfing CIM | Broker CIM | Consumer/Retail | $30M | Partial (6-page sample) ✅ |
+| PTL Group CIM | Receivership CIM | Industrial | C$15M | Forecast-only handled ✅ |
+| SolarWinds 10-K | SEC Filing | Enterprise SW | $938M | Full extraction ✅ |
+| Cvent 10-K | SEC Filing | Event Tech | $188M | Full extraction ✅ |
 
+## Setup
 ```bash
-export ANTHROPIC_API_KEY="your-key"
-python main.py analyze path/to/cim.pdf
-python main.py qa path/to/cim.pdf "What is the customer retention rate?"
-python main.py score path/to/cim.pdf --weights conservative
+cd meridian-ai
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+export GOOGLE_API_KEY=your_gemini_key
+streamlit run app.py
 ```
+
+## Environment Variables
+- `GOOGLE_API_KEY` — Gemini API key (required for extraction + memo generation)
+- `ANTHROPIC_API_KEY` — Optional, for future Claude integration
+
+## For Contributing Agents
+Priority areas for improvement:
+1. **Fund matcher** — scoring/fund_matcher.py — needs real PE fund database with sector coverage
+2. **Extraction prompt** — prompts/extraction.py — handles most formats but edge cases remain
+3. **Scoring engine** — scoring/deal_scorer.py — weights need sector-specific tuning
+4. **Comp set** — needs API integration for peer financial multiples
+5. **UI polish** — app.py — Streamlit limitations; consider migration to Next.js for production
