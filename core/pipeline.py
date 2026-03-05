@@ -110,6 +110,7 @@ def detect_narrative_gaps(
 
     rev_ltm          = _safe_float(rev.get("ltm"))
     ebitda_ltm       = _safe_float(ebitda.get("ltm")) or _safe_float(ebitda.get("adjusted_ebitda_ltm"))
+    fcf_ltm          = _safe_float(fin.get("free_cash_flow") or fin.get("fcf"))
     ebitda_margin    = _norm_pct(_safe_float(ebitda.get("margin_ltm")))
     gross_margin     = _norm_pct(_safe_float(fin.get("gross_margin")))
     cagr_3yr         = _norm_pct(_safe_float(rev.get("cagr_3yr")))
@@ -137,10 +138,12 @@ def detect_narrative_gaps(
     _rev_kw        = re.compile(r'\brevenue\b|\bsales\b|\btop[ -]line\b', re.IGNORECASE)
     _ebitda_kw     = re.compile(r'\bebitda\b', re.IGNORECASE)
     _margin_kw     = re.compile(r'\bmargin\b', re.IGNORECASE)
+    _profit_kw     = re.compile(r'\bprofit\b', re.IGNORECASE)
     _gross_kw      = re.compile(r'\bgross\b', re.IGNORECASE)
     _cagr_kw       = re.compile(r'\bcagr\b|\bcompound(ed)? annual\b|\bgrowth rate\b', re.IGNORECASE)
     _recurring_kw  = re.compile(r'\brecurring\b|\bsubscription\b|\bARR\b', re.IGNORECASE)
     _retention_kw  = re.compile(r'\bretention\b|\bnet retention\b', re.IGNORECASE)
+    _fcf_kw        = re.compile(r'\bfree cash flow\b|\bFCF\b|\bcash flow\b', re.IGNORECASE)
 
     # ── Local helpers ──────────────────────────────────────────────────────
     def _parse_dollar(s: str) -> Optional[float]:
@@ -161,6 +164,57 @@ def detect_narrative_gaps(
             return None
         val = float(m.group("pnum")) / 100.0
         return -val if m.group("psign") else val
+
+    def _parse_pct_near(s: str, anchor_pat) -> Optional[float]:
+        """Pick the % value nearest to anchor_pat.
+
+        Strategy: prefer the first match that appears AFTER the anchor keyword
+        (handles 'gross margin 70% … recurring 85%' correctly).
+        Falls back to nearest-overall if nothing follows the anchor.
+        """
+        anch = anchor_pat.search(s)
+        if not anch:
+            return _parse_pct(s)
+        anchor_end = anch.end()
+        # First preference: smallest-distance % that starts AFTER anchor ends
+        after: list = [(m, m.start() - anchor_end)
+                       for m in _pct_pat.finditer(s) if m.start() >= anchor_end]
+        if after:
+            best_m = min(after, key=lambda t: t[1])[0]
+            val = float(best_m.group("pnum")) / 100.0
+            return -val if best_m.group("psign") else val
+        # Fallback: nearest by absolute distance
+        best_val: Optional[float] = None
+        best_dist = float("inf")
+        for m in _pct_pat.finditer(s):
+            dist = abs(m.start() - anch.start())
+            if dist < best_dist:
+                best_dist = dist
+                val = float(m.group("pnum")) / 100.0
+                best_val = -val if m.group("psign") else val
+        return best_val
+
+    def _parse_dollar_near(s: str, anchor_pat) -> Optional[float]:
+        """Pick the $ value that appears first AFTER anchor_pat in s.
+
+        Falls back to _parse_dollar (first match) if nothing follows.
+        """
+        anch = anchor_pat.search(s)
+        if not anch:
+            return _parse_dollar(s)
+        anchor_end = anch.end()
+        after: list = [(m, m.start() - anchor_end)
+                       for m in _dollar_pat.finditer(s) if m.start() >= anchor_end]
+        if after:
+            best_m = min(after, key=lambda t: t[1])[0]
+            num = float(best_m.group("dnum").replace(",", ""))
+            suffix = (best_m.group("dunit") or "").upper()
+            mult = {"M": 1e6, "MM": 1e6, "MILLION": 1e6,
+                    "B": 1e9, "BN": 1e9, "BILLION": 1e9,
+                    "K": 1e3, "THOUSAND": 1e3}
+            val = num * mult.get(suffix, 1.0)
+            return -val if best_m.group("dsign") else val
+        return _parse_dollar(s)
 
     def _fmt_pct(v: Optional[float]) -> str:
         return f"{v:.1%}" if v is not None else "N/A"
@@ -189,19 +243,22 @@ def detect_narrative_gaps(
         })
 
     # ── Per-sentence quantitative checks (elif = one metric per sentence) ───
+    # Priority order (highest first):
+    #   1. EBITDA margin  2. CAGR  3. Recurring  4. Gross margin
+    #   5. Retention  6. FCF dollar  7. EBITDA dollar  8. Revenue dollar
     sentences = _split_sentences(memo_text)
     seen = {k: False for k in ("revenue", "ebitda", "ebitda_margin", "gross_margin",
-                                "cagr", "recurring_pct", "retention")}
+                                "cagr", "recurring_pct", "retention", "fcf")}
 
     for sentence, source in sentences:
         s = sentence.strip()
         if len(s) < 15:
             continue
 
-        # Priority 1: EBITDA margin — requires both "ebitda" AND "margin"
+        # P1: EBITDA margin — "ebitda" AND "margin" in same sentence
         if _ebitda_kw.search(s) and _margin_kw.search(s):
             if not seen["ebitda_margin"]:
-                pct = _parse_pct(s)
+                pct = _parse_pct_near(s, _ebitda_kw)
                 if pct is not None:
                     seen["ebitda_margin"] = True
                     if ebitda_margin is None:
@@ -219,31 +276,10 @@ def detect_narrative_gaps(
                                  f"Memo claims {_fmt_pct(pct)} but extracted margin = {_fmt_pct(ebitda_margin)} (diff {diff:.1%})",
                                  sev)
 
-        # Priority 2: Gross margin — "gross" + "margin", NOT "ebitda"
-        elif _gross_kw.search(s) and _margin_kw.search(s) and not _ebitda_kw.search(s):
-            if not seen["gross_margin"]:
-                pct = _parse_pct(s)
-                if pct is not None and pct > 0.05:
-                    seen["gross_margin"] = True
-                    if gross_margin is None:
-                        _add(f"Gross margin {_fmt_pct(pct)}", source,
-                             "N/A (not extracted)", "unverifiable", None, "info")
-                    else:
-                        diff = abs(pct - gross_margin)
-                        if diff <= 0.03:
-                            _add(f"Gross margin {_fmt_pct(pct)}", source,
-                                 f"fin.gross_margin = {_fmt_pct(gross_margin)}", "confirmed", None, "info")
-                        else:
-                            sev = "warning" if diff <= 0.08 else "critical"
-                            _add(f"Gross margin {_fmt_pct(pct)}", source,
-                                 f"fin.gross_margin = {_fmt_pct(gross_margin)}", "discrepancy",
-                                 f"Memo claims {_fmt_pct(pct)} but extracted = {_fmt_pct(gross_margin)} (diff {diff:.1%})",
-                                 sev)
-
-        # Priority 3: CAGR / growth rate
+        # P2: CAGR / growth rate
         elif _cagr_kw.search(s):
             if not seen["cagr"]:
-                pct = _parse_pct(s)
+                pct = _parse_pct_near(s, _cagr_kw)
                 if pct is not None:
                     seen["cagr"] = True
                     if cagr_3yr is None:
@@ -261,10 +297,10 @@ def detect_narrative_gaps(
                                  f"Memo claims {_fmt_pct(pct)} CAGR but extracted 3yr CAGR = {_fmt_pct(cagr_3yr)} (diff {diff:.1%})",
                                  sev)
 
-        # Priority 4: Recurring revenue — NOT ebitda/gross sentences
-        elif _recurring_kw.search(s) and not _ebitda_kw.search(s) and not _gross_kw.search(s):
+        # P3: Recurring revenue — BEFORE gross; not ebitda sentences
+        elif _recurring_kw.search(s) and not _ebitda_kw.search(s):
             if not seen["recurring_pct"]:
-                pct = _parse_pct(s)
+                pct = _parse_pct_near(s, _recurring_kw)
                 if pct is not None and 0.05 < pct <= 1.0:
                     seen["recurring_pct"] = True
                     if recurring_rev_pct is None:
@@ -282,10 +318,34 @@ def detect_narrative_gaps(
                                  f"Memo claims {_fmt_pct(pct)} recurring but extracted = {_fmt_pct(recurring_rev_pct)} (diff {diff:.1%})",
                                  sev)
 
-        # Priority 5: Customer retention
+        # P4: Gross margin — "gross" AND ("margin" OR "profit"), not ebitda/recurring
+        elif (_gross_kw.search(s)
+              and (_margin_kw.search(s) or _profit_kw.search(s))
+              and not _ebitda_kw.search(s)
+              and not _recurring_kw.search(s)):
+            if not seen["gross_margin"]:
+                pct = _parse_pct_near(s, _gross_kw)
+                if pct is not None and pct > 0.05:
+                    seen["gross_margin"] = True
+                    if gross_margin is None:
+                        _add(f"Gross margin {_fmt_pct(pct)}", source,
+                             "N/A (not extracted)", "unverifiable", None, "info")
+                    else:
+                        diff = abs(pct - gross_margin)
+                        if diff <= 0.03:
+                            _add(f"Gross margin {_fmt_pct(pct)}", source,
+                                 f"fin.gross_margin = {_fmt_pct(gross_margin)}", "confirmed", None, "info")
+                        else:
+                            sev = "warning" if diff <= 0.08 else "critical"
+                            _add(f"Gross margin {_fmt_pct(pct)}", source,
+                                 f"fin.gross_margin = {_fmt_pct(gross_margin)}", "discrepancy",
+                                 f"Memo claims {_fmt_pct(pct)} but extracted = {_fmt_pct(gross_margin)} (diff {diff:.1%})",
+                                 sev)
+
+        # P5: Customer retention
         elif _retention_kw.search(s):
             if not seen["retention"]:
-                pct = _parse_pct(s)
+                pct = _parse_pct_near(s, _retention_kw)
                 if pct is not None and 0.50 < pct <= 1.0:
                     seen["retention"] = True
                     if retention is None:
@@ -303,10 +363,31 @@ def detect_narrative_gaps(
                                  f"Memo claims {_fmt_pct(pct)} retention but extracted = {_fmt_pct(retention)} (diff {diff:.1%})",
                                  sev)
 
-        # Priority 6: EBITDA dollar — "ebitda" without "margin" keyword
-        elif _ebitda_kw.search(s) and not _margin_kw.search(s):
+        # P6: Free cash flow dollar — BEFORE EBITDA dollar
+        elif _fcf_kw.search(s):
+            if not seen["fcf"]:
+                dollar = _parse_dollar_near(s, _fcf_kw)
+                if dollar is not None and dollar != 0:
+                    seen["fcf"] = True
+                    if fcf_ltm is None:
+                        _add(f"Free cash flow {_fmt_dollar(dollar)}", source,
+                             "N/A (not extracted)", "unverifiable", None, "info")
+                    else:
+                        delta = abs(dollar - fcf_ltm) / max(abs(fcf_ltm), 1)
+                        if delta <= 0.15:
+                            _add(f"Free cash flow {_fmt_dollar(dollar)}", source,
+                                 f"fin.free_cash_flow = {_fmt_dollar(fcf_ltm)}", "confirmed", None, "info")
+                        else:
+                            sev = "warning" if delta <= 0.30 else "critical"
+                            _add(f"Free cash flow {_fmt_dollar(dollar)}", source,
+                                 f"fin.free_cash_flow = {_fmt_dollar(fcf_ltm)}", "discrepancy",
+                                 f"Memo claims {_fmt_dollar(dollar)} but extracted FCF = {_fmt_dollar(fcf_ltm)} (Δ {delta:.0%})",
+                                 sev)
+
+        # P7: EBITDA dollar — "ebitda" without "margin" AND without FCF anchors
+        elif _ebitda_kw.search(s) and not _margin_kw.search(s) and not _fcf_kw.search(s):
             if not seen["ebitda"]:
-                dollar = _parse_dollar(s)
+                dollar = _parse_dollar_near(s, _ebitda_kw)
                 if dollar is not None and dollar != 0:
                     seen["ebitda"] = True
                     if ebitda_ltm is None:
@@ -324,10 +405,13 @@ def detect_narrative_gaps(
                                  f"Memo claims {_fmt_dollar(dollar)} but extracted = {_fmt_dollar(ebitda_ltm)} (Δ {delta:.0%})",
                                  sev)
 
-        # Priority 7: Revenue dollar — broadest, only if no ebitda/gross keywords
-        elif _rev_kw.search(s) and not _ebitda_kw.search(s) and not _gross_kw.search(s):
+        # P8: Revenue dollar — broadest, only if no ebitda/gross/FCF keywords
+        elif (_rev_kw.search(s)
+              and not _ebitda_kw.search(s)
+              and not _gross_kw.search(s)
+              and not _fcf_kw.search(s)):
             if not seen["revenue"]:
-                dollar = _parse_dollar(s)
+                dollar = _parse_dollar_near(s, _rev_kw)
                 if dollar and dollar > 0:
                     seen["revenue"] = True
                     if rev_ltm is None:

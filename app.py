@@ -2936,19 +2936,27 @@ if st.session_state.result:
             if _ng_confirmed:
                 with st.expander(f"✅ {len(_ng_confirmed)} confirmed claim(s)", expanded=False):
                     for _g in _ng_confirmed:
+                        _claim_h    = html.escape(str(_g.get("claim", ""))).replace("$", "&#36;")
+                        _exval_h    = html.escape(str(_g.get("extracted_value", ""))).replace("$", "&#36;")
+                        _src_h      = html.escape(str(_g.get("claim_source", "")))
                         st.markdown(
-                            f"- **{_escape_dollars(str(_g['claim']))}** — "
-                            f"`{_escape_dollars(str(_g['extracted_value']))}` "
-                            f"*(source: {_g['claim_source']})*"
+                            f"<div style='margin:3px 0 3px 8px'>"
+                            f"• <b>{_claim_h}</b> — <code>{_exval_h}</code> "
+                            f"<em style='color:#888'>({_src_h})</em></div>",
+                            unsafe_allow_html=True,
                         )
 
             if _ng_unverifiable:
                 with st.expander(f"❓ {len(_ng_unverifiable)} unverifiable claim(s)", expanded=False):
                     for _g in _ng_unverifiable:
+                        _claim_h    = html.escape(str(_g.get("claim", ""))).replace("$", "&#36;")
+                        _exval_h    = html.escape(str(_g.get("extracted_value", ""))).replace("$", "&#36;")
+                        _src_h      = html.escape(str(_g.get("claim_source", "")))
                         st.markdown(
-                            f"- **{_escape_dollars(str(_g['claim']))}** — "
-                            f"`{_escape_dollars(str(_g['extracted_value']))}` "
-                            f"*(source: {_g['claim_source']})*"
+                            f"<div style='margin:3px 0 3px 8px'>"
+                            f"• <b>{_claim_h}</b> — <code>{_exval_h}</code> "
+                            f"<em style='color:#888'>({_src_h})</em></div>",
+                            unsafe_allow_html=True,
                         )
         elif not llm_risks:
             st.caption("No narrative validation issues detected.")
