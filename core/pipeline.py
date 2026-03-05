@@ -109,7 +109,13 @@ def detect_narrative_gaps(
     recurring_rev_pct = _safe_float(fin.get("recurring_revenue_pct"))
     top_cust_conc    = _safe_float(customers.get("top_customer_concentration"))
     retention        = _safe_float(customers.get("customer_retention"))
-    rev_history      = rev.get("history") or {}
+    _raw_history     = rev.get("history") or {}
+    # Normalise: list [{year, value}] → dict {str(year): value}
+    if isinstance(_raw_history, list):
+        rev_history = {str(item.get("year", i)): item.get("value")
+                       for i, item in enumerate(_raw_history) if isinstance(item, dict)}
+    else:
+        rev_history = _raw_history
 
     # ── Compiled patterns ──────────────────────────────────────────────────
     _dollar_pat    = re.compile(

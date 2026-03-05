@@ -39,7 +39,13 @@ def _fmt_dollar(v: Optional[float]) -> str:
 
 def _rule_growth_deceleration(rev: Dict) -> Optional[Dict]:
     """RULE 1 — Revenue Growth Deceleration."""
-    history = rev.get("history") or {}
+    _raw = rev.get("history") or {}
+    # Normalise: list [{year, value}] → dict {str(year): value}
+    if isinstance(_raw, list):
+        history = {str(item.get("year", i)): item.get("value")
+                   for i, item in enumerate(_raw) if isinstance(item, dict)}
+    else:
+        history = _raw
     years   = sorted(history.keys())
     values  = [_sf(history.get(y)) for y in years]
     values  = [v for v in values if v is not None and v > 0]

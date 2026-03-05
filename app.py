@@ -2107,8 +2107,14 @@ def _run_analysis(uploaded_file, profile: str, progress_cb=None):
 
         # Narrative gap detection (pure regex — no LLM)
         from core.pipeline import detect_narrative_gaps
-        narrative_gaps = detect_narrative_gaps(extracted_data, memo, document.raw_text) if memo else []
-        print(f"[narrative debug] gaps={len(narrative_gaps)}: {narrative_gaps[:2]}")
+        try:
+            narrative_gaps = detect_narrative_gaps(extracted_data, memo, document.raw_text) if memo else []
+            print(f"[narrative debug] gaps={len(narrative_gaps)}: {narrative_gaps[:2]}")
+        except Exception as _ng_exc:
+            import traceback
+            print(f"[narrative debug] ERROR: {_ng_exc}")
+            traceback.print_exc()
+            narrative_gaps = []
 
         # Deterministic insights + deal persistence (best-effort)
         insights: list = []
