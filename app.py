@@ -2485,7 +2485,7 @@ if st.session_state.result:
             seg_df = pd.DataFrame(seg_rows)
             st.dataframe(
                 seg_df,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "Segment name": st.column_config.TextColumn(width="large"),
@@ -2500,15 +2500,44 @@ if st.session_state.result:
         memo_risks      = _extract_memo_risks(result.memo)
         heuristic_risks = [r for r in (result.risks or []) if r.source == "heuristic"]
         llm_risks       = [r for r in (result.risks or []) if r.source == "llm"]
+        _ngaps          = getattr(result, "narrative_gaps", None) or []
 
-        has_any = memo_risks or heuristic_risks or llm_risks
+        has_any = memo_risks or heuristic_risks or llm_risks or _ngaps
 
         if not has_any:
             st.info("No risks identified (or risk analysis was disabled).")
 
+        # ── Section 1: Automated Flags ────────────────────────────────────
+        st.markdown("### Automated Flags")
+        st.caption("Rule-based checks triggered by extracted financial and operational metrics.")
+        if heuristic_risks:
+            for risk in heuristic_risks:
+                sev_colour = _severity_colour(risk.severity)
+                with st.expander(
+                    f"[{risk.severity}] {risk.category} — {risk.title}",
+                    expanded=(risk.severity in ("Critical", "High")),
+                ):
+                    st.markdown(
+                        f"<span style='background:{sev_colour};color:white;"
+                        f"padding:2px 10px;border-radius:4px;font-weight:600;font-size:0.8rem'>"
+                        f"{risk.severity}</span> &nbsp; **{risk.category}**",
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(_escape_dollars(risk.description))
+                    if risk.diligence_question:
+                        st.info(f"**Diligence:** {_escape_dollars(risk.diligence_question)}")
+        else:
+            st.caption("No automated flags triggered.")
+
+        # ── Section 2: Narrative Validation ──────────────────────────────
+        st.divider()
+        st.markdown("### Narrative Validation")
+        st.caption(
+            "Structured AI risk extraction and cross-check of memo claims against "
+            "extracted financials."
+        )
+
         if llm_risks:
-            st.markdown("### Diligence Risks (AI Risk Analyzer)")
-            st.caption("Risks identified through structured AI analysis.")
             for risk in llm_risks:
                 sev_colour = _severity_colour(risk.severity)
                 with st.expander(
@@ -2527,38 +2556,8 @@ if st.session_state.result:
                     if risk.diligence_question:
                         st.info(f"**Diligence:** {_escape_dollars(risk.diligence_question)}")
 
-        # ── Section 2: Automated Flags ────────────────────────────────────
-        # Also a flat sibling — always rendered independently
-        if heuristic_risks:
-            if memo_risks or llm_risks:
-                st.divider()
-            st.markdown("### Automated Flags")
-            st.caption("Rule-based checks triggered by extracted financial and operational metrics.")
-            for risk in heuristic_risks:
-                sev_colour = _severity_colour(risk.severity)
-                with st.expander(
-                    f"[{risk.severity}] {risk.category} — {risk.title}",
-                    expanded=(risk.severity in ("Critical", "High")),
-                ):
-                    st.markdown(
-                        f"<span style='background:{sev_colour};color:white;"
-                        f"padding:2px 10px;border-radius:4px;font-weight:600;font-size:0.8rem'>"
-                        f"{risk.severity}</span> &nbsp; **{risk.category}**",
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(_escape_dollars(risk.description))
-                    if risk.diligence_question:
-                        st.info(f"**Diligence:** {_escape_dollars(risk.diligence_question)}")
-
-        # ── Section 3: Narrative Validation ──────────────────────────────
-        _ngaps = getattr(result, "narrative_gaps", None) or []
         if _ngaps:
-            st.divider()
-            st.markdown("### Narrative Validation")
-            st.caption(
-                "Programmatic cross-check of memo claims against extracted financials. "
-                "No LLM involved — pure regex + arithmetic."
-            )
+            st.caption("Programmatic claim validation:")
             _ng_confirmed    = [g for g in _ngaps if g["status"] == "confirmed"]
             _ng_discrepancy  = [g for g in _ngaps if g["status"] == "discrepancy"]
             _ng_unverifiable = [g for g in _ngaps if g["status"] == "unverifiable"]
@@ -2596,7 +2595,10 @@ if st.session_state.result:
                             f"- **{_g['claim']}** — {_g['extracted_value']} "
                             f"*(source: {_g['claim_source']})*"
                         )
+        elif not llm_risks:
+            st.caption("No narrative validation issues detected.")
 
+        # ── Section 3: Diligence Risks from Memo ─────────────────────────
         st.divider()
         st.markdown("### Diligence Risks from Memo")
         st.caption("Qualitative risks parsed from the investment memo.")
@@ -2628,18 +2630,21 @@ if st.session_state.result:
         if has_any:
             st.caption("Meridian AI · Risk Assessment")
 
-        # ── Sector-Specific Flags ─────────────────────────────────────────
+        # ── Section 4: Sector-Specific Flags ──────────────────────────────
         _industry = st.session_state.get("industry_profile", "General")
         _sector_flags = _SECTOR_FLAGS.get(_industry, [])
-        if _sector_flags:
-            st.markdown("---")
+        if _industry != "General":
+            st.divider()
             st.markdown("### Sector-Specific Flags")
             st.caption(
                 f"Domain considerations for {_industry} investments — "
                 "shown independently of document extraction."
             )
-            for _icon, _title, _body in _sector_flags:
-                st.info(f"**{_icon} {_title}** — {_body}")
+            if _sector_flags:
+                for _icon, _title, _body in _sector_flags:
+                    st.info(f"**{_icon} {_title}** — {_body}")
+            else:
+                st.caption("No sector-specific flags configured for this profile.")
 
 
     # ── Tab: Comps ────────────────────────────────────────────────────────

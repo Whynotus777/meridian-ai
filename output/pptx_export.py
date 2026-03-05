@@ -237,6 +237,17 @@ def _clean_markdown(text: str) -> str:
     return text.strip()
 
 
+def _truncate_at_word(text: str, max_chars: int = 150) -> str:
+    """Truncate text at a word boundary; append '…' if truncated."""
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    last_space = cut.rfind(' ')
+    if last_space > max_chars * 0.55:
+        cut = cut[:last_space]
+    return cut.rstrip(' .,;') + "…"
+
+
 def _parse_numbered_items(content: str, max_items: int = 8) -> List[str]:
     """Extract only explicitly numbered or bulleted items; skip preamble prose."""
     if not content:
@@ -504,12 +515,18 @@ def _slide_3(prs, sections: List[Dict], co: Dict) -> None:
     _footer(slide, 3)
 
     raw_content = _clean_markdown(_find_section(sections, "executive summary", "executive"))
+    _co_name_key = re.sub(r'[\s,\.]+', ' ', co.get("company_name", "")).strip().lower()
+
+    def _is_company_name(text: str) -> bool:
+        return re.sub(r'[\s,\.]+', ' ', text).strip().lower() == _co_name_key
+
     bullets: List[str] = []
     if raw_content:
-        # Split on double-newlines to get paragraphs; flatten each to one line
         for para in raw_content.split("\n\n"):
             para = re.sub(r'\s*\n\s*', ' ', para).strip()
             if not para or len(para) < 20:
+                continue
+            if _is_company_name(para):
                 continue
             # Truncate long paragraphs to first sentence
             if len(para) > 200:
@@ -518,6 +535,18 @@ def _slide_3(prs, sections: List[Dict], co: Dict) -> None:
             bullets.append(para)
             if len(bullets) >= 6:
                 break
+        # If paragraph splitting yielded too few, fall back to sentence splitting
+        if len(bullets) < 3:
+            bullets = []
+            full_flat = re.sub(r'\s*\n\s*', ' ', raw_content)
+            for sent in re.split(r'(?<=[.!?])\s+', full_flat):
+                sent = sent.strip()
+                if len(sent) < 20 or _is_company_name(sent):
+                    continue
+                if sent not in bullets:
+                    bullets.append(sent)
+                if len(bullets) >= 6:
+                    break
     if not bullets:
         bullets = _to_bullets(co.get("description", ""), 4)
     if not bullets:
@@ -544,8 +573,24 @@ def _slide_4(prs, sections: List[Dict], co: Dict, customers: Dict) -> None:
     _header(slide, "Company Overview")
     _footer(slide, 4)
 
-    content = _find_section(sections, "company overview", "overview")
-    bullets = _to_bullets(content, 5)
+    raw_ov  = _clean_markdown(_find_section(sections, "company overview", "overview"))
+    _co_nm  = re.sub(r'[\s,\.]+', ' ', co.get("company_name", "")).strip().lower()
+    bullets: List[str] = []
+    if raw_ov:
+        for para in raw_ov.split("\n\n"):
+            para = re.sub(r'\s*\n\s*', ' ', para).strip()
+            if not para or len(para) < 20:
+                continue
+            if re.sub(r'[\s,\.]+', ' ', para).strip().lower() == _co_nm:
+                continue
+            if len(para) > 180:
+                m = re.search(r'^(.+?[.!?])\s', para)
+                para = m.group(1) if m else para[:180]
+            bullets.append(para)
+            if len(bullets) >= 5:
+                break
+        if len(bullets) < 2:
+            bullets = _to_bullets(raw_ov, 5)
     if not bullets:
         bullets = _to_bullets(co.get("description", ""), 4)
 
@@ -791,9 +836,23 @@ def _slide_7(prs, sections: List[Dict], growth_thesis: Dict) -> None:
     _header(slide, "Growth Thesis")
     _footer(slide, 7)
 
-    content = _find_section(sections, "growth thesis", "growth")
-    bullets = _to_bullets(content, 6)
+    raw_gt = _clean_markdown(_find_section(sections, "growth thesis", "growth"))
+    bullets: List[str] = []
 
+    # Paragraph-split first; each paragraph = one lever
+    if raw_gt:
+        for para in raw_gt.split("\n\n"):
+            para = re.sub(r'\s*\n\s*', ' ', para).strip()
+            if len(para) < 20:
+                continue
+            bullets.append(_truncate_at_word(para, 150))
+            if len(bullets) >= 6:
+                break
+        # If paragraphs didn't yield enough, try line-by-line
+        if len(bullets) < 3:
+            bullets = [_truncate_at_word(b, 150) for b in _to_bullets(raw_gt, 6)]
+
+    # Fallback to extracted growth_thesis dict fields
     if not bullets and isinstance(growth_thesis, dict):
         for lbl, key in [("Organic", "organic_levers"), ("M&A", "ma_opportunity"),
                          ("Expansion", "expansion_plans"), ("Technology", "technology_initiatives")]:
@@ -801,9 +860,9 @@ def _slide_7(prs, sections: List[Dict], growth_thesis: Dict) -> None:
             if isinstance(items, list):
                 for it in items:
                     if it and str(it).lower() not in ("not_provided", "none"):
-                        bullets.append(str(it)[:200])
+                        bullets.append(_truncate_at_word(str(it), 150))
             elif items and str(items).lower() not in ("not_provided", "none"):
-                bullets.append(f"{lbl}: {str(items)[:180]}")
+                bullets.append(_truncate_at_word(f"{lbl}: {str(items)}", 150))
             if len(bullets) >= 6:
                 break
 
@@ -833,15 +892,32 @@ def _slide_8(prs, risks, sections: List[Dict]) -> None:
     for r in (risks or []):
         title = getattr(r, "title", "") or getattr(r, "description", "")[:60] or ""
         sev   = getattr(r, "severity", "Medium") or "Medium"
-        mit   = getattr(r, "mitigation", "") or "Under diligence"
-        rows.append((title[:90], sev, str(mit)[:100]))
+        # Field is 'mitigant', not 'mitigation'
+        mit   = (getattr(r, "mitigant", None) or getattr(r, "mitigation", None) or "").strip()
+        rows.append((title[:90], sev, (mit[:100] if mit else "Under diligence")))
 
-    # Supplement with memo qualitative risks
-    if len(rows) < 5:
-        memo_content = _find_section(sections, "risk", "mitigant")
-        for b in _to_bullets(memo_content, 8):
-            if not any(b[:28] in r[0] for r in rows):
-                rows.append((b[:90], "Medium", "Under diligence"))
+    # Supplement with memo qualitative risks (with actual mitigant text)
+    if len(rows) < 8:
+        memo_content = _clean_markdown(_find_section(sections, "key risks", "risk", "mitigant"))
+        # Try to parse numbered blocks with mitigants
+        blocks = re.split(r'\n(?=\d+[\.\)])', memo_content)
+        for block in blocks:
+            block = block.strip()
+            if not block or not re.match(r'^\d+', block):
+                continue
+            # Split on "Mitigant:" label
+            parts = re.split(r'\n?\s*(?:\*\*?)?Mitigant(?:\*\*?)?\s*:', block, maxsplit=1, flags=re.IGNORECASE)
+            risk_text = re.sub(r'^\d+[\.\)]\s*', '', parts[0]).replace('**', '').strip()
+            mitigant  = parts[1].strip().replace('**', '') if len(parts) > 1 else "Under diligence"
+            # First line of risk_text = title
+            risk_title = risk_text.split('\n')[0].strip()[:90]
+            if not risk_title or len(risk_title) < 10:
+                continue
+            if any(risk_title[:28] in r[0] for r in rows):
+                continue
+            rows.append((risk_title, "Medium", mitigant[:100]))
+            if len(rows) >= 12:
+                break
 
     if not rows:
         rows = [("No automated risks flagged — perform manual risk review.", "Low", "N/A")]
@@ -890,7 +966,7 @@ def _slide_8(prs, risks, sections: List[Dict]) -> None:
 # Slide 9 — Comparable Companies
 # ---------------------------------------------------------------------------
 
-def _slide_9(prs, comps, market: Dict) -> None:
+def _slide_9(prs, comps, market: Dict, extracted_data: Optional[Dict] = None) -> None:
     slide = _blank_slide(prs)
     _set_bg(slide, _OFF_WHITE)
     _header(slide, "Comparable Companies")
@@ -907,6 +983,21 @@ def _slide_9(prs, comps, market: Dict) -> None:
         _label(slide, f"Competitive Position: {cp}",
                _MARGIN, Inches(1.0), Inches(8), Inches(0.28),
                bold=True, size=12, color=_NAVY)
+
+    # Collect identified peers — try multiple possible field names
+    _raw_peers = (
+        market.get("key_competitors")
+        or market.get("competitors")
+        or market.get("direct_competitors")
+        or (extracted_data or {}).get("key_competitors")
+        or []
+    )
+    key_competitors = []
+    for c in (_raw_peers or []):
+        name = c.get("name", str(c)) if isinstance(c, dict) else str(c)
+        name = name.strip()
+        if name and name.lower() not in ("not_provided", "none", "n/a"):
+            key_competitors.append(name)
 
     table_y = Inches(1.36)
 
@@ -940,32 +1031,34 @@ def _slide_9(prs, comps, market: Dict) -> None:
                        cw - Inches(0.14), row_h - Inches(0.08), size=9.5, color=_BLACK)
                 cx += cw
 
-        # Always show identified peers from extraction below the comps table
-        key_competitors = [c for c in (market.get("key_competitors") or []) if c]
+        # Identified peers row below comps table
         if key_competitors:
-            peers_y = table_y + Inches(0.32) + min(len(comps), 12) * row_h + Inches(0.18)
-            peer_str = "Identified Peers: " + ",  ".join(str(c) for c in key_competitors[:8])
-            _label(slide, peer_str,
-                   _MARGIN, peers_y, _W - _MARGIN * 2, Inches(0.30),
+            peers_y = table_y + Inches(0.32) + min(len(comps), 12) * row_h + Inches(0.22)
+            peer_str = "Identified Peers:  " + "   |   ".join(key_competitors[:8])
+            _label(slide, peer_str, _MARGIN, peers_y, _W - _MARGIN * 2, Inches(0.32),
                    size=9.5, color=_DARK_GREY, italic=True)
     else:
-        # Show key competitors from market extraction instead
-        key_competitors = [c for c in (market.get("key_competitors") or []) if c]
-        _label(slide,
-               "No comparable companies identified in this document.\n"
-               "Comparable analysis requires PitchBook / Capital IQ API for sector transaction multiples.",
-               _MARGIN, table_y, _W - _MARGIN * 2, Inches(0.65),
-               size=12, color=_DARK_GREY)
-
+        # No LLM comps — show identified peers prominently
         if key_competitors:
-            _label(slide, "KEY COMPETITORS MENTIONED IN DOCUMENT",
-                   _MARGIN, table_y + Inches(0.75), Inches(9), Inches(0.28),
-                   bold=True, size=10, color=_NAVY)
+            _label(slide, "Identified Peers from Document Analysis",
+                   _MARGIN, table_y, _W - _MARGIN * 2, Inches(0.30),
+                   bold=True, size=13, color=_NAVY)
+            _rect(slide, _MARGIN, table_y + Inches(0.30), Inches(3.0), Inches(0.04), _ORANGE)
             lines = [(f"  •  {c}", {"size": 12, "color": _DARK_GREY,
                                      "space_before": 6 if i > 0 else 0})
                      for i, c in enumerate(key_competitors[:10])]
-            _multiline(slide, lines, _MARGIN, table_y + Inches(1.08),
-                       _W - _MARGIN * 2, Inches(3.5))
+            _multiline(slide, lines, _MARGIN, table_y + Inches(0.42),
+                       _W - _MARGIN * 2, Inches(4.0))
+            _label(slide,
+                   "No transaction multiples available — financial comps require PitchBook / Capital IQ.",
+                   _MARGIN, table_y + Inches(4.6), _W - _MARGIN * 2, Inches(0.26),
+                   size=9, color=_MED_GREY, italic=True)
+        else:
+            _label(slide,
+                   "No comparable companies or identified peers found in this document.\n"
+                   "Comparable analysis requires PitchBook / Capital IQ API for sector transaction multiples.",
+                   _MARGIN, table_y, _W - _MARGIN * 2, Inches(0.65),
+                   size=12, color=_DARK_GREY)
 
 
 # ---------------------------------------------------------------------------
@@ -1130,7 +1223,7 @@ def generate_ic_deck(result: "AnalysisResult", output_path: str) -> None:
     _slide_6(prs, fin, currency)
     _slide_7(prs, sections, growth)
     _slide_8(prs, risks, sections)
-    _slide_9(prs, comps, market)
+    _slide_9(prs, comps, market, extracted_data=ed)
     _slide_10(prs, ds)
     _slide_11(prs, sections, ds)
 

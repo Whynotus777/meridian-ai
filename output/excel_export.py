@@ -176,6 +176,7 @@ def _build_revenue_breakdown(ws, extracted_data: dict, company_name: str):
     fin = extracted_data.get("financials", {})
     rev = fin.get("revenue", {})
     segments = fin.get("revenue_by_segment", [])
+    revenue_history = rev.get("history", []) if isinstance(rev.get("history"), list) else []
 
     _title_row(ws, f"Revenue Breakdown — {company_name}", 4)
 
@@ -201,9 +202,39 @@ def _build_revenue_breakdown(ws, extracted_data: dict, company_name: str):
         _data_cell(ws, row, 3, _fmt_num(e), alt_row=alt, align="right")
         _data_cell(ws, row, 4, _fmt_pct(m), alt_row=alt, align="right")
 
+    next_row = 6
+
+    # Revenue history section (if available)
+    if revenue_history:
+        hist_start = next_row + 1
+        ws.merge_cells(
+            start_row=hist_start, start_column=1,
+            end_row=hist_start, end_column=4,
+        )
+        cell = ws.cell(row=hist_start, column=1, value="Revenue History")
+        cell.font = Font(bold=True, color=_WHITE, size=11)
+        cell.fill = PatternFill("solid", fgColor=_DARK_BLUE)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        for col, header in enumerate(
+            ["Period", "Revenue", "YoY Growth", "Notes"], start=1
+        ):
+            _header_cell(ws, hist_start + 1, col, header)
+
+        for i, row in enumerate(revenue_history):
+            if not isinstance(row, dict):
+                continue
+            r = hist_start + 2 + i
+            alt = (i % 2 == 1)
+            _data_cell(ws, r, 1, row.get("period", "N/A"), alt_row=alt)
+            _data_cell(ws, r, 2, _fmt_num(row.get("value")), alt_row=alt, align="right")
+            _data_cell(ws, r, 3, _fmt_pct(row.get("yoy_growth")), alt_row=alt, align="right")
+            _data_cell(ws, r, 4, "", alt_row=alt)
+        next_row = hist_start + 2 + len(revenue_history)
+
     # Segment table (if available)
     if segments:
-        seg_start = 7
+        seg_start = next_row + 1
         ws.merge_cells(
             start_row=seg_start, start_column=1,
             end_row=seg_start, end_column=4,
@@ -226,7 +257,7 @@ def _build_revenue_breakdown(ws, extracted_data: dict, company_name: str):
             _data_cell(ws, r, 3, _fmt_pct(seg.get("pct_of_total")), alt_row=alt, align="right")
             _data_cell(ws, r, 4, "", alt_row=alt)
     else:
-        ws.cell(row=7, column=1, value="Segment data not provided in CIM.").font = Font(
+        ws.cell(row=next_row + 1, column=1, value="Segment data not provided in CIM.").font = Font(
             italic=True, color="888888"
         )
 
@@ -366,95 +397,109 @@ def _build_comp_set_enhanced(
 
 
 def _extract_memo_risks_for_export(memo_text: str) -> list:
-    """Extract qualitative memo risks from JSON memo or markdown text."""
+    """Extract qualitative memo risks from JSON memo (sections format) or markdown."""
     if not memo_text:
         return []
 
-    stop_markers = (
-        "VALUATION CONTEXT",
-        "KEY DILIGENCE QUESTIONS",
-        "DILIGENCE QUESTIONS",
-        "RECOMMENDATION",
-    )
-
-    def _cut(text: str) -> str:
-        if not isinstance(text, str):
-            return ""
-        up = text.upper()
-        cut_idx = None
-        for marker in stop_markers:
-            idx = up.find(marker)
-            if idx != -1 and (cut_idx is None or idx < cut_idx):
-                cut_idx = idx
-        return text[:cut_idx].strip() if cut_idx is not None else text.strip()
+    def _strip_md(text: str) -> str:
+        text = re.sub(r'\*\*(.+?)\*\*', r'\1', text, flags=re.DOTALL)
+        text = re.sub(r'\*(.+?)\*',     r'\1', text, flags=re.DOTALL)
+        return text.strip()
 
     def _mk_row(risk: str, mitigant: str = "", description: str = "") -> Optional[dict]:
-        risk = _cut((risk or "").strip())
-        mitigant = _cut((mitigant or "").strip())
-        description = _cut((description or "").strip())
-        if not risk:
+        risk        = _strip_md((risk        or "").strip())
+        mitigant    = _strip_md((mitigant    or "").strip())
+        description = _strip_md((description or "").strip())
+        if not risk or len(risk) < 5:
             return None
         title = risk.split(":", 1)[0].strip()[:120]
         return {
-            "category": "Memo",
-            "severity": "Medium",
-            "title": title,
-            "description": description or risk,
-            "mitigant": mitigant or "—",
+            "category":           "Memo",
+            "severity":           "Medium",
+            "title":              title,
+            "description":        description or risk,
+            "mitigant":           mitigant or "—",
             "diligence_question": "—",
         }
 
+    def _parse_risk_text(text: str) -> list:
+        """Parse numbered risk blocks with optional Mitigant: lines."""
+        results = []
+        blocks = re.split(r'\n(?=\d+[\.\)])', text.strip())
+        for block in blocks:
+            block = block.strip()
+            if not block:
+                continue
+            if not re.match(r'^\d+', block):
+                if len(block) > 20:
+                    results.append(_mk_row(block))
+                continue
+            parts = re.split(
+                r'\n?\s*(?:\*\*?)?Mitigant(?:\*\*?)?\s*:',
+                block, maxsplit=1, flags=re.IGNORECASE,
+            )
+            risk_raw = re.sub(r'^\d+[\.\)]\s*', '', parts[0]).strip()
+            mitigant = parts[1].strip() if len(parts) > 1 else ""
+            row = _mk_row(risk_raw, mitigant)
+            if row:
+                results.append(row)
+        return [r for r in results if r]
+
+    out = []
+
+    # ── JSON parsing ───────────────────────────────────────────────────────
     try:
         data = json.loads(memo_text)
     except (json.JSONDecodeError, TypeError):
         data = None
 
-    out = []
     if isinstance(data, dict):
-        icm = data.get("investment_committee_memo")
-        if isinstance(icm, dict):
-            risk_list = icm.get("key_risks_and_mitigants")
-            if isinstance(risk_list, list):
-                for item in risk_list:
+        # Path 1: flat sections array (standard memo format)
+        for section in (data.get("sections") or []):
+            heading = (section.get("heading") or section.get("title") or "").lower()
+            if not ("risk" in heading or "mitigant" in heading):
+                continue
+            content = section.get("content") or ""
+            if isinstance(content, list):
+                for item in content:
                     if isinstance(item, dict):
                         row = _mk_row(
-                            item.get("risk") or item.get("title") or "",
+                            item.get("risk")     or item.get("title")      or "",
                             item.get("mitigant") or item.get("mitigation") or "",
                             item.get("description") or "",
                         )
                         if row:
                             out.append(row)
-                if out:
-                    return out
+            elif isinstance(content, str) and content.strip():
+                out.extend(_parse_risk_text(content))
+            if out:
+                return out
 
-    # Markdown/plain-text fallback
+        # Path 2: nested investment_committee_memo structure
+        icm = data.get("investment_committee_memo") or {}
+        risk_list = icm.get("key_risks_and_mitigants") or []
+        if isinstance(risk_list, list):
+            for item in risk_list:
+                if isinstance(item, dict):
+                    row = _mk_row(
+                        item.get("risk")     or item.get("title")      or "",
+                        item.get("mitigant") or item.get("mitigation") or "",
+                        item.get("description") or "",
+                    )
+                    if row:
+                        out.append(row)
+            if out:
+                return out
+
+    # ── Markdown fallback ──────────────────────────────────────────────────
     section_match = re.search(
-        r"(?:KEY RISKS|RISKS?\s*&\s*MITIGANTS?|5\.\s*KEY RISKS)(.*?)(?:\n\*{0,2}\s*\d+\.\s*[A-Z]|\n#{1,3}\s|\Z)",
+        r"(?:KEY RISKS|RISKS?\s*&\s*MITIGANTS?|key_risks_and_mitigants)(.*?)"
+        r"(?:\n#+\s|\n\d+\.\s+[A-Z][A-Z]|\Z)",
         memo_text,
         re.DOTALL | re.IGNORECASE,
     )
-    if not section_match:
-        return []
-
-    risk_text = _cut(section_match.group(1).strip())
-    blocks = re.split(r"\n(?=\d+\.)", risk_text)
-    for block in blocks:
-        block = block.strip()
-        if not block or not re.match(r"^\d+\.", block):
-            continue
-        parts = re.split(
-            r"\n\s*(?:[\*\-]\s*)?(?:\*\*?)?Mitigant(?:\*\*?)?\s*:",
-            block,
-            flags=re.IGNORECASE,
-            maxsplit=1,
-        )
-        risk_block = parts[0].strip()
-        mitigant = parts[1].strip() if len(parts) > 1 else ""
-        risk_block = re.sub(r"^\d+\.\s*", "", risk_block).strip()
-        risk_block = risk_block.replace("**", "").replace("*", "").strip()
-        row = _mk_row(risk_block, mitigant)
-        if row:
-            out.append(row)
+    if section_match:
+        out.extend(_parse_risk_text(section_match.group(1).strip()))
 
     return out
 
@@ -592,6 +637,71 @@ def _build_deal_score(ws, deal_score, company_name: str):
 # Public API
 # ---------------------------------------------------------------------------
 
+def _build_narrative_validation(ws, narrative_gaps: list, company_name: str):
+    """Narrative Validation (banker spin detector) sheet."""
+    _title_row(ws, f"Narrative Validation — {company_name}", 6)
+
+    headers = ["Claim", "Source", "Extracted Value", "Status", "Gap / Delta", "Severity"]
+    widths  = [40, 28, 30, 14, 55, 12]
+    for col, (h, w) in enumerate(zip(headers, widths), start=1):
+        _header_cell(ws, 2, col, h, width_hint=w)
+
+    _status_colors = {
+        "confirmed":    "70AD47",   # green
+        "discrepancy":  "FF0000",   # red
+        "unverifiable": "FFC000",   # amber
+    }
+    _sev_colors = {
+        "critical": "C00000",
+        "warning":  "FFC000",
+        "info":     "70AD47",
+    }
+
+    if not narrative_gaps:
+        ws.cell(row=3, column=1,
+                value="No narrative gaps detected (memo not generated or no checkable claims found)."
+                ).font = Font(italic=True, color="888888")
+        return
+
+    # Sort: discrepancies first, then unverifiable, then confirmed
+    order = {"discrepancy": 0, "unverifiable": 1, "confirmed": 2}
+    sev_order = {"critical": 0, "warning": 1, "info": 2}
+    sorted_gaps = sorted(
+        narrative_gaps,
+        key=lambda g: (order.get(g.get("status", ""), 9),
+                       sev_order.get(g.get("severity", ""), 9)),
+    )
+
+    for i, gap in enumerate(sorted_gaps):
+        r   = i + 3
+        alt = (i % 2 == 1)
+        status   = gap.get("status", "")
+        severity = gap.get("severity", "")
+
+        _data_cell(ws, r, 1, gap.get("claim", ""),          alt_row=alt)
+        _data_cell(ws, r, 2, gap.get("claim_source", ""),   alt_row=alt)
+        _data_cell(ws, r, 3, gap.get("extracted_value", ""),alt_row=alt)
+
+        # Status cell with colour
+        stat_cell = ws.cell(row=r, column=4, value=status.title())
+        stat_cell.fill  = PatternFill("solid", fgColor=_status_colors.get(status, _MED_GREY))
+        stat_cell.font  = Font(bold=True, color=_WHITE, size=10)
+        stat_cell.alignment = Alignment(horizontal="center", vertical="center")
+        stat_cell.border = _thin_border()
+
+        _data_cell(ws, r, 5, gap.get("gap") or "—", alt_row=alt)
+
+        sev_cell = ws.cell(row=r, column=6, value=severity.title())
+        sev_cell.fill  = PatternFill("solid", fgColor=_sev_colors.get(severity, _MED_GREY))
+        sev_cell.font  = Font(bold=True, color=_WHITE if severity != "warning" else "111111", size=10)
+        sev_cell.alignment = Alignment(horizontal="center", vertical="center")
+        sev_cell.border = _thin_border()
+
+        ws.row_dimensions[r].height = 30
+
+    ws.freeze_panes = "A3"
+
+
 def export_excel(result: "AnalysisResult", output_path: str) -> str:
     """Build and save the Excel workbook from an AnalysisResult.
 
@@ -646,12 +756,18 @@ def export_excel(result: "AnalysisResult", output_path: str) -> str:
     ws5 = wb.create_sheet("Deal Score")
     _build_deal_score(ws5, result.deal_score, company_name)
 
+    # --- Tab 6: Narrative Validation (banker spin detector) ---
+    narrative_gaps = getattr(result, "narrative_gaps", None) or []
+    ws6 = wb.create_sheet("Narrative Validation")
+    _build_narrative_validation(ws6, narrative_gaps, company_name)
+
     # Set tab colours
     ws1.sheet_properties.tabColor = _NAVY
     ws2.sheet_properties.tabColor = _DARK_BLUE
     ws3.sheet_properties.tabColor = "4472C4"
     ws4.sheet_properties.tabColor = _DARK_RED
     ws5.sheet_properties.tabColor = _GREEN
+    ws6.sheet_properties.tabColor = _ORANGE
 
     wb.save(output_path)
     return os.path.abspath(output_path)
