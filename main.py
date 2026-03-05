@@ -127,6 +127,15 @@ def cmd_analyze(args):
     except Exception as e:
         print(f"  (Word export skipped: {e})")
 
+    # Export IC Deck PowerPoint
+    try:
+        from output.pptx_export import generate_ic_deck
+        pptx_path = output_path.replace(".json", "_ic_deck.pptx")
+        generate_ic_deck(result, pptx_path)
+        print(f"  IC Deck saved to: {pptx_path}")
+    except Exception as e:
+        print(f"  (IC Deck export skipped: {e})")
+
     print(f"\n  Total time: {result.timing.get('total', 0):.1f}s")
     print(f"{'='*60}\n")
 

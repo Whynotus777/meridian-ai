@@ -678,35 +678,70 @@ def _render_pipeline_dashboard(show_title: bool = True):
                 )
 
 
-def _render_data_room_tab():
+def _render_data_room_view(show_title: bool = True):
     import pandas as pd
 
-    st.markdown("<div class='section-label'>Deal Data Room</div>", unsafe_allow_html=True)
-    st.markdown(
-        "<div class='info-card'><h4>1 of 5 documents analyzed</h4>"
-        "<p>Keep feeding diligence artifacts to enrich risk, comp, and memo quality.</p></div>",
-        unsafe_allow_html=True,
-    )
+    if show_title:
+        st.markdown("<h2 style='color:#e8e8e8;margin-bottom:0.2rem'>Data Room</h2>", unsafe_allow_html=True)
+    st.caption("Centralized document management for active deals.")
+
+    deals = _pipeline_deals()
+    deal_names = [d.get("company", "Unknown Deal") for d in deals]
+    selected_deal = st.selectbox("Select Deal", options=deal_names, key="_data_room_deal_select")
+
+    analyzed_lookup = {
+        d.get("company"): d
+        for d in st.session_state.get("analyzed_deals", [])
+        if isinstance(d, dict)
+    }
+    selected_analyzed = analyzed_lookup.get(selected_deal)
+
+    first_doc_name = "Confidential Information Memorandum"
+    first_doc_pages = 42
+    first_doc_status = "Analyzed ✅"
+    first_doc_uploaded = "Mar 1, 2026"
+    if selected_analyzed:
+        first_doc_name = selected_analyzed.get("document_name") or first_doc_name
+        first_doc_pages = selected_analyzed.get("document_pages") or first_doc_pages
+        first_doc_uploaded = selected_analyzed.get("uploaded_date") or first_doc_uploaded
 
     docs = [
-        {"Document": "Confidential Information Memorandum", "Type": "CIM", "Pages": 108, "Date": "2026-03-04", "Status": "🟢 Analyzed"},
-        {"Document": "Quality of Earnings Report", "Type": "QofE", "Pages": 74, "Date": "2026-03-02", "Status": "🟡 Pending"},
-        {"Document": "Management Presentation", "Type": "CIM", "Pages": 41, "Date": "2026-02-28", "Status": "🟡 Pending"},
-        {"Document": "Customer Contracts Summary", "Type": "Legal", "Pages": 23, "Date": "2026-02-25", "Status": "⚪ Not Started"},
-        {"Document": "Financial Model", "Type": "Financial", "Pages": 18, "Date": "2026-02-24", "Status": "⚪ Not Started"},
+        {"Document": first_doc_name, "Type": "CIM", "Pages": first_doc_pages, "Status": first_doc_status, "Uploaded": first_doc_uploaded},
+        {"Document": "Quality of Earnings Report", "Type": "QoE", "Pages": "—", "Status": "Pending Upload ⏳", "Uploaded": "—"},
+        {"Document": "Management Presentation", "Type": "Presentation", "Pages": "—", "Status": "Pending Upload ⏳", "Uploaded": "—"},
+        {"Document": "Customer Contracts (Sample)", "Type": "Legal", "Pages": "—", "Status": "Not Started ⏹", "Uploaded": "—"},
+        {"Document": "Financial Model", "Type": "Model", "Pages": "—", "Status": "Not Started ⏹", "Uploaded": "—"},
+        {"Document": "Environmental Assessment", "Type": "Diligence", "Pages": "—", "Status": "Not Started ⏹", "Uploaded": "—"},
     ]
+
+    analyzed_count = sum(1 for d in docs if str(d.get("Status", "")).startswith("Analyzed"))
+    total_count = len(docs)
+    pct = analyzed_count / total_count if total_count else 0
+    with st.container(border=True):
+        st.markdown(f"**{analyzed_count} of {total_count} documents analyzed**")
+        st.progress(pct)
+
     st.dataframe(pd.DataFrame(docs), width="stretch", hide_index=True)
 
-    st.markdown("---")
-    st.markdown("<div class='section-label'>Add Documents</div>", unsafe_allow_html=True)
+    st.divider()
+    st.markdown("<div class='section-label'>Add documents to this deal's data room</div>", unsafe_allow_html=True)
     st.file_uploader(
-        "Upload VDR export or drag documents",
-        type=["pdf", "docx", "xlsx", "csv"],
+        "Add documents to this deal's data room",
+        type=["pdf", "docx", "xlsx", "pptx"],
         accept_multiple_files=True,
         key="_deal_data_room_upload",
         label_visibility="collapsed",
     )
-    st.button("Queue Documents", width="stretch", disabled=True)
+
+    st.markdown(
+        "<div class='info-card' style='margin-top:0.8rem'>"
+        "<h4>Coming Soon</h4>"
+        "<p>VDR Integration — Connect to Intralinks, Datasite, or Box for automatic document sync</p>"
+        "<p>Cross-Document Analysis — Extract and reconcile data across CIM, QoE, and financial model</p>"
+        "<p>Document Versioning — Track changes across document versions</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _render_portfolio_view(show_title: bool = True):
@@ -1315,6 +1350,19 @@ def _make_docx_bytes(result) -> bytes:
         os.unlink(tmp_path)
 
 
+def _make_pptx_bytes(result) -> bytes:
+    """Generate IC Deck PowerPoint bytes from an AnalysisResult."""
+    from output.pptx_export import generate_ic_deck
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pptx") as tmp:
+        tmp_path = tmp.name
+    try:
+        generate_ic_deck(result, tmp_path)
+        with open(tmp_path, "rb") as f:
+            return f.read()
+    finally:
+        os.unlink(tmp_path)
+
+
 def _make_json_bytes(result) -> bytes:
     """Serialise the full analysis result to UTF-8 JSON bytes."""
     import json
@@ -1592,6 +1640,9 @@ def _run_analysis(uploaded_file, profile: str, progress_cb=None):
             "grade": getattr(deal_score, "grade", "B"),
             "days": 1,
             "stage": deal_stage,
+            "document_name": uploaded_file.name,
+            "document_pages": getattr(document, "total_pages", 42),
+            "uploaded_date": time.strftime("%b %d, %Y"),
         }
         existing = st.session_state.get("analyzed_deals", [])
         st.session_state["analyzed_deals"] = [
@@ -1723,6 +1774,9 @@ with st.sidebar:
     if st.button("Portfolio Intelligence", width="stretch"):
         st.session_state["_preview_panel"] = "portfolio"
     st.caption("Cross-portfolio reporting and health monitoring.")
+    if st.button("Data Room", width="stretch"):
+        st.session_state["_preview_panel"] = "data_room"
+    st.caption("Document management and VDR integration.")
 
     # ── Post-analysis sidebar content ────────────────────────────────────
     if st.session_state.result:
@@ -1781,6 +1835,8 @@ with st.sidebar:
             st.session_state["_xlsx_err"]    = None
             st.session_state["_docx_bytes"]  = None
             st.session_state["_docx_err"]    = None
+            st.session_state["_pptx_bytes"]  = None
+            st.session_state["_pptx_err"]    = None
             st.session_state["_json_bytes"]  = None
             st.session_state["_json_err"]    = None
             try:
@@ -1791,6 +1847,10 @@ with st.sidebar:
                 st.session_state["_docx_bytes"] = _make_docx_bytes(result)
             except Exception as _e:
                 st.session_state["_docx_err"] = str(_e)
+            try:
+                st.session_state["_pptx_bytes"] = _make_pptx_bytes(result)
+            except Exception as _e:
+                st.session_state["_pptx_err"] = str(_e)
             try:
                 st.session_state["_json_bytes"] = _make_json_bytes(result)
             except Exception as _e:
@@ -1819,6 +1879,17 @@ with st.sidebar:
             )
         else:
             st.caption(f"Word unavailable: {st.session_state['_docx_err']}")
+
+        if st.session_state["_pptx_bytes"] is not None:
+            st.download_button(
+                label="IC Deck (PowerPoint)",
+                data=st.session_state["_pptx_bytes"],
+                file_name=f"{company_slug}_ic_deck.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                width="stretch",
+            )
+        else:
+            st.caption(f"IC Deck unavailable: {st.session_state['_pptx_err']}")
 
         if st.session_state["_json_bytes"] is not None:
             st.download_button(
@@ -1890,11 +1961,12 @@ if analyze_btn and uploaded_file:
 # ---------------------------------------------------------------------------
 
 _preview_panel = st.session_state.get("_preview_panel")
-if _preview_panel in ("portfolio", "compare", "pipeline"):
+if _preview_panel in ("portfolio", "compare", "pipeline", "data_room"):
     _panel_title = {
         "portfolio": "Portfolio Intelligence",
         "compare": "Deal Comparison",
         "pipeline": "Deal Pipeline Dashboard",
+        "data_room": "Data Room",
     }.get(_preview_panel, "Meridian")
     c_prev, c_close = st.columns([6, 1])
     with c_prev:
@@ -1911,6 +1983,8 @@ if _preview_panel in ("portfolio", "compare", "pipeline"):
         _render_portfolio_view(show_title=False)
     elif _preview_panel == "compare":
         _render_compare_view()
+    elif _preview_panel == "data_room":
+        _render_data_room_view(show_title=False)
     else:
         _render_pipeline_dashboard(show_title=False)
     st.stop()

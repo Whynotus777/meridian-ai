@@ -17,8 +17,12 @@ env/
 *.env.local
 .envrc
 
-# Output files (generated at runtime)
-output/
+# Generated analysis artifacts (JSON, Excel, Word, PPTX, Markdown)
+output/*.json
+output/*.xlsx
+output/*.docx
+output/*.pptx
+output/*.md
 
 # macOS
 .DS_Store
