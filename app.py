@@ -8,7 +8,9 @@ Run with:
 """
 
 import io
+import html
 import os
+import re
 import sys
 import tempfile
 import time
@@ -276,6 +278,58 @@ st.markdown(
     }
     .memo-content li {
         margin-bottom: 0.3rem;
+    }
+    .verification-summary {
+        border: 1px solid #2f3558;
+        background: #171a2b;
+        border-radius: 10px;
+        padding: 0.75rem 0.9rem;
+        margin-top: 0.8rem;
+        margin-bottom: 0.55rem;
+    }
+    .verification-title {
+        color: #dbe3ff;
+        font-weight: 700;
+        font-size: 0.9rem;
+        margin-bottom: 0.2rem;
+    }
+    .verification-line {
+        color: #bcc5ec;
+        font-size: 0.85rem;
+    }
+    .verification-chip-green { color: #65d38b; font-weight: 700; }
+    .verification-chip-amber { color: #f2c86b; font-weight: 700; }
+    .verification-chip-red { color: #ef7a7a; font-weight: 700; }
+    .verification-badge {
+        display: inline-block;
+        padding: 0.12rem 0.5rem;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        margin-left: 0.4rem;
+    }
+    .verification-badge-high { background: #1f5d35; color: #baf0cc; }
+    .verification-badge-medium { background: #6a531f; color: #f7df9e; }
+    .verification-badge-low { background: #6a2222; color: #ffb5b5; }
+    .insight-card {
+        background: #171a2b;
+        border: 1px solid #2f3558;
+        border-left-width: 4px;
+        border-radius: 10px;
+        padding: 0.65rem 0.8rem;
+        margin-bottom: 0.55rem;
+    }
+    .insight-positive { border-left-color: #4caf50; }
+    .insight-info { border-left-color: #4f8bd8; }
+    .insight-warning { border-left-color: #f0b34f; }
+    .insight-title {
+        color: #e8edff;
+        font-weight: 700;
+        margin-bottom: 0.2rem;
+    }
+    .insight-detail {
+        color: #c3cae8;
+        font-size: 0.9rem;
     }
 </style>
 """,
@@ -749,6 +803,110 @@ def _health_dot(status: str) -> str:
     }.get(status, "⚪")
 
 
+def _collect_verification_rows(extracted_data):
+    rows = []
+
+    def _is_missing(v):
+        return v is None or (isinstance(v, str) and v.strip().lower() in {"", "none", "n/a", "not_provided"})
+
+    def _walk(node, path):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                p = f"{path}.{k}" if path else k
+                if k.endswith("_conf"):
+                    base_key = k[:-5]
+                    base_value = node.get(base_key)
+                    source_value = node.get(f"{base_key}_source")
+                    conf = _to_float_or_none(v)
+                    missing = conf == 0 or _is_missing(base_value)
+                    if missing:
+                        category = "missing"
+                    elif conf is None:
+                        category = "missing"
+                    elif conf >= 0.9:
+                        category = "stated"
+                    elif conf >= 0.5:
+                        category = "derived"
+                    elif conf >= 0.1:
+                        category = "inferred"
+                    else:
+                        category = "missing"
+                    rows.append(
+                        {
+                            "field": p[:-5],
+                            "value": base_value,
+                            "confidence": conf,
+                            "category": category,
+                            "cited": not _is_missing(source_value),
+                            "source": source_value,
+                        }
+                    )
+                _walk(v, p)
+        elif isinstance(node, list):
+            for idx, item in enumerate(node):
+                _walk(item, f"{path}[{idx}]")
+
+    _walk(extracted_data or {}, "")
+    return rows
+
+
+def _render_verification_summary(extracted_data):
+    import pandas as pd
+
+    rows = _collect_verification_rows(extracted_data)
+    if not rows:
+        return
+
+    total = len(rows)
+    stated = sum(1 for r in rows if r["category"] == "stated")
+    derived = sum(1 for r in rows if r["category"] == "derived")
+    inferred = sum(1 for r in rows if r["category"] == "inferred")
+    missing = sum(1 for r in rows if r["category"] == "missing")
+    flagged = inferred + missing
+    cited = sum(1 for r in rows if r["cited"])
+    stated_ratio = stated / max(1, total)
+
+    if stated_ratio > 0.70:
+        level = "High"
+        badge_cls = "verification-badge-high"
+    elif stated_ratio > 0.50:
+        level = "Medium"
+        badge_cls = "verification-badge-medium"
+    else:
+        level = "Low"
+        badge_cls = "verification-badge-low"
+
+    st.markdown(
+        "<div class='verification-summary'>"
+        "<div class='verification-title'>Verification Summary</div>"
+        f"<div class='verification-line'>{total} fields · "
+        f"<span class='verification-chip-green'>{stated} verified</span> · "
+        f"<span class='verification-chip-amber'>{derived} derived</span> · "
+        f"<span class='verification-chip-red'>{flagged} flagged</span> · "
+        f"{cited} cited</div>"
+        f"<div class='verification-line'>Overall confidence:"
+        f"<span class='verification-badge {badge_cls}'>{level}</span></div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    with st.expander("View field-by-field confidence breakdown", expanded=False):
+        table = pd.DataFrame(
+            [
+                {
+                    "Field": r["field"],
+                    "Value": _fmt_str(r["value"]) if not isinstance(r["value"], (dict, list)) else str(r["value"]),
+                    "Confidence": "N/A" if r["confidence"] is None else f"{r['confidence']:.2f}",
+                    "Category": r["category"].title(),
+                    "Cited": "Yes" if r["cited"] else "No",
+                    "Source": _fmt_str(r["source"]),
+                }
+                for r in rows
+            ]
+        )
+        st.dataframe(table, width="stretch", hide_index=True)
+
+
 def _pipeline_deals():
     deals = [
         {"company": "NovaTech Solutions", "industry": "Enterprise Software", "revenue": 142_000_000, "grade": "B+", "days": 12, "stage": "Screening"},
@@ -1000,49 +1158,201 @@ def _render_portfolio_view(show_title: bool = True):
 
 
 def _render_compare_view():
-    deals = _pipeline_deals()
-    options = [d["company"] for d in deals]
-    left_sel, right_sel = st.columns(2)
-    company_a = left_sel.selectbox("Company A", options=options, index=0, key="_cmp_a")
-    company_b = right_sel.selectbox("Company B", options=options, index=min(1, len(options) - 1), key="_cmp_b")
+    try:
+        from core.deal_store import list_deals
+        real_deals = list_deals()
+    except Exception:
+        real_deals = []
 
-    a = next(d for d in deals if d["company"] == company_a)
-    b = next(d for d in deals if d["company"] == company_b)
+    try:
+        from core.deal_store import get_peer_deals
+    except Exception:
+        get_peer_deals = None
+
+    def _obj_get(obj, key, default=None):
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    def _first_present(obj, keys, default=None):
+        for key in keys:
+            val = _obj_get(obj, key, None)
+            if val not in (None, "", "not_provided"):
+                return val
+        return default
+
+    def _to_number(val):
+        if val in (None, "", "not_provided"):
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
+    def _build_deal_item(deal_obj, source):
+        company = _first_present(deal_obj, ["company", "company_name", "name"], "Unknown Deal")
+        industry = _first_present(deal_obj, ["industry", "sector"], "Unknown")
+        business_model = _first_present(deal_obj, ["business_model"], "Unknown")
+        if source == "real":
+            # Persisted deal_store payload: use exact field names first.
+            revenue = _to_number(_obj_get(deal_obj, "revenue_ltm"))
+            ebitda = _to_number(_obj_get(deal_obj, "ebitda_ltm"))
+            ebitda_margin = _to_number(_obj_get(deal_obj, "ebitda_margin"))
+            revenue_cagr = _to_number(_obj_get(deal_obj, "revenue_cagr"))
+            recurring = _to_number(_obj_get(deal_obj, "recurring_revenue_pct"))
+            concentration = _to_number(_obj_get(deal_obj, "customer_concentration"))
+            deal_score = _to_number(_obj_get(deal_obj, "deal_score"))
+            grade = _first_present(deal_obj, ["deal_grade"], "N/A")
+        else:
+            revenue = _to_number(_first_present(deal_obj, ["revenue_ltm", "revenue"]))
+            ebitda = _to_number(_first_present(deal_obj, ["ebitda_ltm", "ebitda"]))
+            ebitda_margin = _to_number(_first_present(deal_obj, ["ebitda_margin", "ebitda_margin_ltm"]))
+            revenue_cagr = _to_number(_first_present(deal_obj, ["revenue_cagr", "revenue_cagr_3yr", "growth_3yr_cagr"]))
+            recurring = _to_number(_first_present(deal_obj, ["recurring_revenue_pct", "recurring_revenue"]))
+            concentration = _to_number(_first_present(deal_obj, ["customer_concentration", "top_customer_concentration"]))
+            deal_score = _to_number(_first_present(deal_obj, ["deal_score", "total_score"]))
+            grade = _first_present(deal_obj, ["deal_grade", "grade"], "N/A")
+
+        if source == "mock":
+            revenue = revenue if revenue is not None else _to_number(_obj_get(deal_obj, "revenue"))
+            ebitda = ebitda if ebitda is not None and revenue is not None else (revenue * 0.20 if revenue else None)
+            ebitda_margin = ebitda_margin if ebitda_margin is not None else (ebitda / revenue if ebitda and revenue else None)
+            revenue_cagr = revenue_cagr if revenue_cagr is not None else 0.15
+            recurring = recurring if recurring is not None else 0.72
+            concentration = concentration if concentration is not None else 0.28
+            deal_score = deal_score if deal_score is not None else (0.80 if "A" in str(grade) else 0.68)
+            if business_model == "Unknown":
+                business_model = "B2B SaaS"
+
+        return {
+            "company": str(company),
+            "industry": str(industry),
+            "business_model": str(business_model),
+            "revenue_ltm": revenue,
+            "ebitda_ltm": ebitda,
+            "ebitda_margin": ebitda_margin,
+            "revenue_cagr": revenue_cagr,
+            "recurring_revenue_pct": recurring,
+            "customer_concentration": concentration,
+            "deal_score": deal_score,
+            "deal_grade": str(grade),
+            "source": source,
+            "_raw": deal_obj,
+        }
+
+    real_items = [_build_deal_item(d, "real") for d in (real_deals or [])]
+    mock_items = [_build_deal_item(d, "mock") for d in _pipeline_deals()]
+    all_items = real_items + [m for m in mock_items if m["company"] not in {r["company"] for r in real_items}]
+
+    if not all_items:
+        st.info("No deals available for comparison.")
+        return
+
+    labels = [
+        (f"{d['company']} (Analyzed)" if d["source"] == "real" else d["company"])
+        for d in all_items
+    ]
+    label_to_deal = dict(zip(labels, all_items))
+
+    left_sel, right_sel = st.columns(2)
+    company_a_label = left_sel.selectbox("Company A", options=labels, index=0, key="_cmp_a")
+    company_b_label = right_sel.selectbox("Company B", options=labels, index=min(1, len(labels) - 1), key="_cmp_b")
+
+    a = label_to_deal[company_a_label]
+    b = label_to_deal[company_b_label]
+    if a.get("source") == "real":
+        print(f"[compare debug] selected deal A = {a.get('_raw')}")
+    if b.get("source") == "real":
+        print(f"[compare debug] selected deal B = {b.get('_raw')}")
     metrics = [
-        ("Revenue", a["revenue"], b["revenue"], "num"),
-        ("EBITDA", a["revenue"] * 0.18, b["revenue"] * 0.22, "num"),
-        ("EBITDA Margin", 0.18, 0.22, "pct"),
-        ("Growth (3yr CAGR)", 0.121, 0.224, "pct"),
-        ("Deal Score", 0.79 if "A" in a["grade"] else 0.68, 0.84 if "A" in b["grade"] else 0.70, "pct"),
-        ("Recurring Revenue %", 0.74, 0.88, "pct"),
-        ("Customer Concentration", 0.34, 0.22, "pct_low_wins"),
+        ("Revenue", a["revenue_ltm"], b["revenue_ltm"], "num"),
+        ("EBITDA", a["ebitda_ltm"], b["ebitda_ltm"], "num"),
+        ("EBITDA Margin", a["ebitda_margin"], b["ebitda_margin"], "pct"),
+        ("Growth (3yr CAGR)", a["revenue_cagr"], b["revenue_cagr"], "pct"),
+        ("Deal Score", a["deal_score"], b["deal_score"], "score"),
+        ("Recurring Revenue %", a["recurring_revenue_pct"], b["recurring_revenue_pct"], "pct"),
+        ("Customer Concentration", a["customer_concentration"], b["customer_concentration"], "pct_low_wins"),
     ]
 
     st.divider()
     h1, h2 = st.columns(2)
-    h1.markdown(f"### {company_a}")
-    h2.markdown(f"### {company_b}")
+    h1.markdown(f"### {a['company']}")
+    h2.markdown(f"### {b['company']}")
+
+    a_industry = (a.get("industry") or "").strip().lower()
+    b_industry = (b.get("industry") or "").strip().lower()
+    a_model = (a.get("business_model") or "").strip().lower()
+    b_model = (b.get("business_model") or "").strip().lower()
+    if a_industry and b_industry and a_industry == b_industry:
+        relevance = "🟢 High relevance — same sector"
+    elif a_model and b_model and a_model == b_model:
+        relevance = "🟡 Medium relevance — same business model"
+    else:
+        relevance = "🔴 Cross-sector comparison — use caution benchmarking"
+    h1.caption(relevance)
+    h2.caption(relevance)
 
     for label, av, bv, kind in metrics:
         c1, c2, c3 = st.columns([2, 2, 2])
+        avn = _to_number(av)
+        bvn = _to_number(bv)
         if kind == "num":
             a_txt, b_txt = _fmt_num(av), _fmt_num(bv)
-            awin = av >= bv
-            bwin = bv > av
+            awin = avn is not None and bvn is not None and avn >= bvn
+            bwin = avn is not None and bvn is not None and bvn > avn
         elif kind == "pct_low_wins":
             a_txt, b_txt = _fmt_pct(av), _fmt_pct(bv)
-            awin = av <= bv
-            bwin = bv < av
+            awin = avn is not None and bvn is not None and avn <= bvn
+            bwin = avn is not None and bvn is not None and bvn < avn
+        elif kind == "score":
+            a_txt = "N/A" if avn is None else (f"{avn:.0%}" if avn <= 1.0 else f"{avn:.1f}")
+            b_txt = "N/A" if bvn is None else (f"{bvn:.0%}" if bvn <= 1.0 else f"{bvn:.1f}")
+            awin = avn is not None and bvn is not None and avn >= bvn
+            bwin = avn is not None and bvn is not None and bvn > avn
         else:
             a_txt, b_txt = _fmt_pct(av), _fmt_pct(bv)
-            awin = av >= bv
-            bwin = bv > av
+            awin = avn is not None and bvn is not None and avn >= bvn
+            bwin = avn is not None and bvn is not None and bvn > avn
         c1.write(label)
         c2.markdown(f"<span style='color:{'#65d38b' if awin else '#d3d7f8'};font-weight:700'>{a_txt}</span>", unsafe_allow_html=True)
         c3.markdown(f"<span style='color:{'#65d38b' if bwin else '#d3d7f8'};font-weight:700'>{b_txt}</span>", unsafe_allow_html=True)
 
+    # Peer context for same-sector comparisons
+    if a_industry and b_industry and a_industry == b_industry and callable(get_peer_deals):
+        peers = []
+        try:
+            peers = get_peer_deals(a.get("industry"))
+        except TypeError:
+            try:
+                peers = get_peer_deals(sector=a.get("industry"))
+            except Exception:
+                peers = []
+        except Exception:
+            peers = []
+        revs = [_to_number(_first_present(p, ["revenue_ltm", "revenue"])) for p in (peers or [])]
+        margins = [_to_number(_first_present(p, ["ebitda_margin", "ebitda_margin_ltm"])) for p in (peers or [])]
+        revs = sorted([x for x in revs if x is not None])
+        margins = sorted([x for x in margins if x is not None])
+        if revs and margins:
+            def _median(values):
+                n = len(values)
+                mid = n // 2
+                if n % 2 == 1:
+                    return values[mid]
+                return (values[mid - 1] + values[mid]) / 2
+            med_rev = _median(revs)
+            med_margin = _median(margins)
+            st.caption(
+                f"Based on {len(peers)} {a.get('industry')} deals analyzed: "
+                f"median revenue {_fmt_num(med_rev)}, median EBITDA margin {_fmt_pct(med_margin)}"
+            )
+
     st.divider()
-    winner = company_a if a["revenue"] >= b["revenue"] else company_b
+    a_rev = _to_number(a.get("revenue_ltm")) or 0
+    b_rev = _to_number(b.get("revenue_ltm")) or 0
+    winner = a["company"] if a_rev >= b_rev else b["company"]
     st.markdown(
         "<div style='background:#1a1f2e;border:1px solid #2b3657;border-radius:8px;"
         "padding:0.75rem 0.9rem;color:#c8d0ef'>"
@@ -1233,6 +1543,7 @@ def _extract_memo_risks(memo_text: str) -> list:
         risk_txt = _truncate_at_stop_markers(
             str(entry.get("risk") or entry.get("title") or "").strip()
         )
+        risk_txt = risk_txt.replace("**", "").replace("*", "").replace("\n", " ").strip()
         mitigant_txt = _truncate_at_stop_markers(
             str(entry.get("mitigant") or entry.get("mitigation") or "").strip()
         )
@@ -1794,6 +2105,39 @@ def _run_analysis(uploaded_file, profile: str, progress_cb=None):
         if progress_cb:
             progress_cb(100, "Finalizing analysis...", time.time() - _t0)
 
+        # Narrative gap detection (pure regex — no LLM)
+        from core.pipeline import detect_narrative_gaps
+        narrative_gaps = detect_narrative_gaps(extracted_data, memo, document.raw_text) if memo else []
+        print(f"[narrative debug] gaps={len(narrative_gaps)}: {narrative_gaps[:2]}")
+
+        # Deterministic insights + deal persistence (best-effort)
+        insights: list = []
+        try:
+            from core.insights import generate_insights
+            from core.deal_store import save_deal, get_peer_deals
+            _partial = AnalysisResult(
+                document=document,
+                extracted_data=extracted_data,
+                memo=memo,
+                risks=risks,
+                comps=comps,
+                deal_score=deal_score,
+                timing={},
+                narrative_gaps=narrative_gaps,
+            )
+            _deal_id = save_deal(
+                _partial,
+                document_name=uploaded_file.name,
+                pages=getattr(document, "total_pages", 0),
+                duration=time.time() - _t0,
+            )
+            _industry = extracted_data.get("company_overview", {}).get("industry", "")
+            _peers = get_peer_deals(_industry, exclude_id=_deal_id)
+            insights = generate_insights(extracted_data, peer_deals=_peers or None)
+            print(f"[insights debug] generated {len(insights)} insights")
+        except Exception as _exc:
+            print(f"[insights debug] error: {_exc}")
+            pass
 
         result = AnalysisResult(
             document=document,
@@ -1803,6 +2147,8 @@ def _run_analysis(uploaded_file, profile: str, progress_cb=None):
             comps=comps,
             deal_score=deal_score,
             timing={},
+            narrative_gaps=narrative_gaps,
+            insights=insights,
         )
 
         st.session_state.result   = result
@@ -2355,6 +2701,7 @@ if st.session_state.result:
             unsafe_allow_html=True,
         )
 
+    _render_verification_summary(result.extracted_data)
     st.markdown("---")
 
     # ── Tabs ──────────────────────────────────────────────────────────────
@@ -2606,9 +2953,10 @@ if st.session_state.result:
             for item in memo_risks:
                 if isinstance(item, dict):
                     title = (item.get("risk") or item.get("title") or "").strip()
+                    title = title.replace("**", "").replace("*", "").replace("\n", "").strip()
                     description = (item.get("description") or "").strip()
                     mitigant = (item.get("mitigant") or item.get("mitigation") or "").strip()
-                    label = item.get("risk", "")
+                    label = (item.get("risk") or "").replace("**", "").replace("*", "").replace("\n", "").strip()
                     if ": " in label and len(label) > 80:
                         label = label.split(": ")[0]
                     label = label[:80] or description[:80]
@@ -2788,6 +3136,38 @@ if st.session_state.result:
                 st.warning(
                     f"⚠️ This deal falls outside {firm_name}'s investment mandate on {failed_n} criteria."
                 )
+            st.markdown(
+                "<div class='section-label'>Key Observations</div>",
+                unsafe_allow_html=True,
+            )
+            insights = (
+                result.insights
+                if hasattr(result, "insights")
+                else st.session_state.get("_result", {}).get("insights", [])
+            )
+            if not isinstance(insights, list) or not insights:
+                st.caption("Key observations will appear after analysis completes.")
+            else:
+                sev_cfg = {
+                    "positive": ("insight-positive", "✅"),
+                    "info": ("insight-info", "ℹ️"),
+                    "warning": ("insight-warning", "⚠️"),
+                }
+                for item in insights:
+                    if not isinstance(item, dict):
+                        continue
+                    severity = str(item.get("severity", "info")).lower()
+                    css_cls, icon = sev_cfg.get(severity, sev_cfg["info"])
+                    title = html.escape(str(item.get("title") or "Observation"))
+                    detail = html.escape(str(item.get("detail") or item.get("content") or ""))
+                    with st.container():
+                        st.markdown(
+                            f"<div class='insight-card {css_cls}'>"
+                            f"<div class='insight-title'>{icon} {title}</div>"
+                            f"<div class='insight-detail'>{_escape_dollars(detail)}</div>"
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
             st.markdown("---")
 
             st.markdown(
@@ -2821,7 +3201,7 @@ if st.session_state.result:
                 else:
                     st.markdown(f"**Mandate Fit: {mandate_fit}%**")
                 for _passed, line in mandate_eval.get("criteria", []):
-                    st.markdown(line)
+                    st.markdown(_escape_dollars(line))
 
     # ── Tab: Q&A ──────────────────────────────────────────────────────────
     with tab_qa:

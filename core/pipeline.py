@@ -515,6 +515,7 @@ class MeridianPipeline:
             self._log(f"  Memo: {len(memo):,} chars")
             if memo:
                 narrative_gaps = detect_narrative_gaps(extracted_data, memo, document.raw_text)
+                print(f"[narrative debug] gaps={len(narrative_gaps)}: {narrative_gaps[:2]}")
 
         # Step 4: Risk analysis
         risks = []
@@ -581,6 +582,7 @@ class MeridianPipeline:
             industry = extracted_data.get("company_overview", {}).get("industry", "")
             peers = get_peer_deals(industry, exclude_id=deal_id)
             result.insights = generate_insights(extracted_data, peer_deals=peers or None)
+            print(f"[insights debug] generated {len(result.insights)} insights")
             self._log(
                 f"  Saved deal {deal_id[:8]}… | "
                 f"{len(peers)} peer(s) | {len(result.insights)} insight(s)"
