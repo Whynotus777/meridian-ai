@@ -509,6 +509,71 @@ def detect_narrative_gaps(
             _add("Consistent revenue growth", "Memo (qualitative)",
                  "N/A (no history extracted)", "unverifiable", None, "info")
 
+    # ── Spin detection: qualitative claim vs extracted financials ─────────────
+    def _find_source(phrase: str) -> str:
+        """Return the section heading in memo_text that contains phrase."""
+        pos = memo_lower.find(phrase.lower())
+        if pos < 0:
+            return "Memo (qualitative)"
+        chunk = memo_text[:pos]
+        h_pos = chunk.rfind("## ")
+        if h_pos < 0:
+            return "Memo"
+        end = chunk.find("\n", h_pos + 3)
+        heading = (chunk[h_pos + 3: end] if end > 0 else chunk[h_pos + 3:]).strip()
+        return heading or "Memo"
+
+    # Spin 1: "strong/healthy/robust profitability or margins" but EBITDA margin < 10%
+    _spin1 = next((p for p in (
+        "strong profitability", "strong margins", "strong margin",
+        "healthy margins", "healthy margin", "robust margins", "robust margin",
+    ) if p in memo_lower), None)
+    if _spin1 and ebitda_margin is not None and ebitda_margin < 0.10:
+        _add(f'Memo: "{_spin1}"', _find_source(_spin1),
+             f"ebitda.margin_ltm = {_fmt_pct(ebitda_margin)}", "discrepancy",
+             f"Memo describes margins as strong but EBITDA margin is {_fmt_pct(ebitda_margin)}",
+             "critical")
+
+    # Spin 2: "high/highly/strong recurring" but recurring_revenue_pct < 50%
+    _spin2 = next((p for p in (
+        "high recurring", "highly recurring", "strong recurring",
+    ) if p in memo_lower), None)
+    if _spin2 and recurring_rev_pct is not None and recurring_rev_pct < 0.50:
+        _add(f'Memo: "{_spin2}"', _find_source(_spin2),
+             f"recurring_revenue_pct = {_fmt_pct(recurring_rev_pct)}", "discrepancy",
+             f"Memo claims high recurring but extracted = {_fmt_pct(recurring_rev_pct)} (< 50% threshold)",
+             "warning")
+
+    # Spin 3: "minimal/low/diversified concentration" but top_cust_conc > 25%
+    _spin3 = next((p for p in (
+        "minimal concentration", "low concentration", "diversified customer",
+        "no single customer", "well diversified",
+    ) if p in memo_lower), None)
+    if _spin3 and top_cust_conc is not None and top_cust_conc > 0.25:
+        _add(f'Memo: "{_spin3}"', _find_source(_spin3),
+             f"top_customer_conc = {_fmt_pct(top_cust_conc)}", "discrepancy",
+             f"Memo claims minimal concentration but top_customer_conc = {_fmt_pct(top_cust_conc)} (> 25%)",
+             "warning")
+
+    # Spin 4: "consistent/strong/robust growth" but YoY growth decelerating by > 10 pp
+    _spin4 = next((p for p in (
+        "consistent growth", "strong growth", "robust growth",
+        "consistent revenue growth",
+    ) if p in memo_lower), None)
+    if _spin4 and rev_history:
+        _yrs  = sorted(rev_history.keys())
+        _vals = [_safe_float(rev_history.get(y)) for y in _yrs]
+        _vals = [v for v in _vals if v is not None and v > 0]
+        if len(_vals) >= 3:
+            _rates = [(_vals[i] - _vals[i - 1]) / max(_vals[i - 1], 1)
+                      for i in range(1, len(_vals))]
+            _prev_rate, _curr_rate = _rates[-2], _rates[-1]
+            if _prev_rate - _curr_rate > 0.10:
+                _add(f'Memo: "{_spin4}"', _find_source(_spin4),
+                     f"YoY growth: {_prev_rate:.1%} → {_curr_rate:.1%}", "discrepancy",
+                     f"Memo claims strong growth but YoY growth declined from {_prev_rate:.1%} to {_curr_rate:.1%}",
+                     "warning")
+
     # ── Never return empty — fallback from extraction data ─────────────────
     if not gaps:
         _note = (

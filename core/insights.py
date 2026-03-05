@@ -260,6 +260,61 @@ def _rule_peer_percentile(extraction: Dict, peer_deals: List[Dict]) -> List[Dict
     return insights
 
 
+def _rule_of_40(extraction: Dict, fin: Dict, rev: Dict) -> Optional[Dict]:
+    """RULE 7 — Rule of 40 (SaaS / software companies only)."""
+    ebitda_d = fin.get("ebitda", {}) if isinstance(fin.get("ebitda"), dict) else {}
+    cagr = _sf(rev.get("cagr_3yr"))
+    margin = _sf(ebitda_d.get("margin_ltm"))
+
+    if cagr is None or margin is None:
+        return None
+
+    # Normalise: if stored as raw % (e.g. 22.5 instead of 0.225)
+    if abs(cagr) > 1.5:
+        cagr = cagr / 100.0
+    if abs(margin) > 1.5:
+        margin = margin / 100.0
+
+    co = extraction.get("company_overview", {})
+    industry = (co.get("industry") or "").lower()
+    recurring_pct = _sf(fin.get("recurring_revenue_pct"))
+    if recurring_pct is not None and abs(recurring_pct) > 1.5:
+        recurring_pct = recurring_pct / 100.0
+
+    is_saas = (
+        any(kw in industry for kw in ("software", "saas", "technology", "tech"))
+        or (recurring_pct is not None and recurring_pct > 0.70)
+    )
+    if not is_saas:
+        return None
+
+    # Both values as percentages (e.g. 26.7, -25.5)
+    growth_pct = cagr * 100.0
+    margin_pct = margin * 100.0
+    score = growth_pct + margin_pct
+
+    if score >= 40:
+        sev = "positive"
+        benchmark = "Exceeds"
+    elif score >= 20:
+        sev = "info"
+        benchmark = "Below"
+    else:
+        sev = "warning"
+        benchmark = "Below"
+
+    return {
+        "type":     "rule_of_40",
+        "title":    f"Rule of 40: {score:.1f}",
+        "detail":   (
+            f"Revenue growth ({growth_pct:.1f}%) + EBITDA margin ({margin_pct:.1f}%) = {score:.1f}. "
+            f"{benchmark} the SaaS benchmark of 40."
+        ),
+        "severity": sev,
+        "metrics":  {"rule_of_40": score, "revenue_cagr": cagr, "ebitda_margin": margin},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -284,13 +339,14 @@ def generate_insights(
 
     results: List[Dict[str, Any]] = []
 
-    # Rules 1-5: single-document checks
+    # Rules 1-5, 7: single-document checks
     for fn, args in [
-        (_rule_growth_deceleration, (rev,)),
-        (_rule_recurring_revenue,   (fin,)),
+        (_rule_growth_deceleration,    (rev,)),
+        (_rule_recurring_revenue,      (fin,)),
         (_rule_customer_concentration, (customers,)),
         (_rule_ebitda_fcf_divergence,  (fin,)),
         (_rule_capital_intensity,      (fin, rev)),
+        (_rule_of_40,                  (extraction, fin, rev)),
     ]:
         try:
             insight = fn(*args)

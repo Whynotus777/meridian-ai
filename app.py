@@ -850,7 +850,7 @@ def _collect_verification_rows(extracted_data):
     return rows
 
 
-def _render_verification_summary(extracted_data):
+def _render_verification_summary(extracted_data, narrative_gaps=None):
     import pandas as pd
 
     rows = _collect_verification_rows(extracted_data)
@@ -866,26 +866,49 @@ def _render_verification_summary(extracted_data):
     cited = sum(1 for r in rows if r["cited"])
     stated_ratio = stated / max(1, total)
 
-    if stated_ratio > 0.70:
-        level = "High"
+    coverage_ratio = cited / max(1, total)
+    if coverage_ratio >= 0.80:
+        level = "Strong"
         badge_cls = "verification-badge-high"
-    elif stated_ratio > 0.50:
-        level = "Medium"
+    elif coverage_ratio >= 0.50:
+        level = "Moderate"
         badge_cls = "verification-badge-medium"
     else:
-        level = "Low"
+        level = "Limited"
         badge_cls = "verification-badge-low"
 
+    # Trust check summary line (uses narrative_gaps if available)
+    _ngaps = narrative_gaps or []
+    _confirmed_n = sum(1 for g in _ngaps if g.get("status") == "confirmed")
+    _disc_n      = sum(1 for g in _ngaps if g.get("status") == "discrepancy")
+    if _disc_n > 0:
+        _trust_icon = "⚠️"
+        _trust_line = (
+            f"Trust Check: Verified {_confirmed_n} claim(s) &nbsp;•&nbsp; "
+            f"<b style='color:#ef7a7a'>{_disc_n} discrepanc{'y' if _disc_n==1 else 'ies'} found</b> "
+            f"&nbsp;•&nbsp; {cited}/{total} fields cited"
+        )
+    else:
+        _trust_icon = "✅"
+        _trust_line = (
+            f"Trust Check: Verified {_confirmed_n} claim(s) &nbsp;•&nbsp; "
+            f"0 discrepancies &nbsp;•&nbsp; {cited}/{total} fields cited"
+        )
+
+    st.markdown(
+        f"<div style='font-size:0.82rem;margin-bottom:6px;color:#ccc'>"
+        f"{_trust_icon} {_trust_line}</div>",
+        unsafe_allow_html=True,
+    )
     st.markdown(
         "<div class='verification-summary'>"
         "<div class='verification-title'>Verification Summary</div>"
         f"<div class='verification-line'>{total} fields · "
         f"<span class='verification-chip-green'>{stated} verified</span> · "
         f"<span class='verification-chip-amber'>{derived} derived</span> · "
-        f"<span class='verification-chip-red'>{flagged} flagged</span> · "
-        f"{cited} cited</div>"
-        f"<div class='verification-line'>Overall confidence:"
-        f"<span class='verification-badge {badge_cls}'>{level}</span></div>"
+        f"<span class='verification-chip-red'>{flagged} flagged</span></div>"
+        f"<div class='verification-line'>Document coverage: {cited}/{total} fields cited"
+        f"&nbsp;&nbsp;<span class='verification-badge {badge_cls}'>{level}</span></div>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -2707,7 +2730,7 @@ if st.session_state.result:
             unsafe_allow_html=True,
         )
 
-    _render_verification_summary(result.extracted_data)
+    _render_verification_summary(result.extracted_data, getattr(result, "narrative_gaps", []))
     st.markdown("---")
 
     # ── Tabs ──────────────────────────────────────────────────────────────
